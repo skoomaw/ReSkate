@@ -315,8 +315,8 @@ int trace_id(Shared& s, ID3D12Resource* r, const D3D12_RESOURCE_DESC* d = nullpt
     if (at != s.trace_ids.end()) return at->second;
     const int id = static_cast<int>(s.trace_ids.size()) + 1;
     s.trace_ids.emplace(r, id);
-    s.trace_names.push_back(d ? std::format("#{} {}x{} format {}{}", id, d->Width, d->Height, static_cast<unsigned>(d->Format),
-                                            r == main_depth_now.load() ? " (the world's depth)" : "")
+    s.trace_names.push_back(d ? std::format("#{} {}x{} format {} flags 0x{:x}{}", id, d->Width, d->Height, static_cast<unsigned>(d->Format),
+                                            static_cast<unsigned>(d->Flags), r == main_depth_now.load() ? " (the world's depth)" : "")
                               : std::format("#{}", id));
     return id;
 }
@@ -800,7 +800,9 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
             s.quiet_batches = 0;
             logging::write(logging::Level::info, logging::Channel::graphics,
                            std::format("World cover trace, frame {} of 6 ({}), then the present:", 7 - s.trace_frames_left, s.drawn ? "cover drawn" : "cover NOT drawn"));
-            for (const auto& line : s.trace_lines) logging::write(logging::Level::info, logging::Channel::graphics, "World cover trace" + line);
+            for (const auto& line : s.trace_lines)
+                for (std::size_t at = 0; at < line.size(); at += 700)
+                    logging::write(logging::Level::info, logging::Channel::graphics, (at ? "World cover trace   ..." : "World cover trace") + line.substr(at, 700));
             s.trace_lines.clear();
             if (--s.trace_frames_left == 0) {
                 tracing.store(false);
@@ -894,16 +896,16 @@ void release() noexcept {
 void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b, BarrierFn /*original*/) noexcept {
     if (!active.load(std::memory_order_relaxed) || list == our_list.load(std::memory_order_relaxed)) return;
     try {
-        // While tracing: every transition of the depth or of a big float picture, on any list.
+        // While tracing: every transition of a picture at least half the screen's size, of any format
+        // (the depth, the float pictures, and the tone-mapped and UI pictures after them), on any list.
         if (tracing.load(std::memory_order_relaxed) && b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION && b.Transition.pResource) {
             const auto d = b.Transition.pResource->GetDesc();
-            const bool depth = (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) != 0;
-            if (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && (depth || hdr_view_format(d.Format) != DXGI_FORMAT_UNKNOWN)) {
+            if (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
                 auto& s = shared();
                 std::lock_guard lock(s.mutex);
                 if (d.Width * 2 >= s.width && d.Height * 2 >= s.height) {
                     auto& n = s.notes[list];
-                    if (n.events.size() < 32)
+                    if (n.events.size() < 400)
                         n.events.push_back(std::format("{}#{} 0x{:x}>0x{:x}{}", list->GetType() == D3D12_COMMAND_LIST_TYPE_DIRECT ? "" : "(compute) ",
                                                        trace_id(s, b.Transition.pResource, &d), static_cast<unsigned>(b.Transition.StateBefore),
                                                        static_cast<unsigned>(b.Transition.StateAfter),
