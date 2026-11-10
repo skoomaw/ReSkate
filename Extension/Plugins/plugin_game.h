@@ -1200,6 +1200,7 @@ public:
     struct WorldModelLook {
         Vec3 position{};
         std::array<float, 4> rotation{0, 0, 0, 1};
+        bool on_board{}; // position and rotation within the local board's deck as drawn
         float scale{1}, glance{0.5f};
         WorldModelMaterial standard;
         std::vector<std::pair<std::string, WorldModelMaterial>> materials;

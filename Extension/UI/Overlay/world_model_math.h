@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <optional>
+#include <utility>
 #include <vector>
 
 // The plain arithmetic of a world model (world_model.h), apart from the GPU, so it can be tested.
@@ -88,6 +89,24 @@ inline std::array<float, 12> placement(const Vec3& position, Quat q, float scale
     return {r[0] * scale, r[1] * scale, r[2] * scale, position[0],
             r[3] * scale, r[4] * scale, r[5] * scale, position[1],
             r[6] * scale, r[7] * scale, r[8] * scale, position[2]};
+}
+// a then b in a's frame (a * b).
+inline Quat multiply(const Quat& a, const Quat& b) noexcept {
+    return {a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+            a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]};
+}
+inline Vec3 rotate(const Quat& q, const Vec3& v) noexcept {
+    const Vec3 u{q[0], q[1], q[2]};
+    const float w = q[3];
+    const Vec3 t{2 * (u[1] * v[2] - u[2] * v[1]), 2 * (u[2] * v[0] - u[0] * v[2]), 2 * (u[0] * v[1] - u[1] * v[0])};
+    return {v[0] + w * t[0] + (u[1] * t[2] - u[2] * t[1]), v[1] + w * t[1] + (u[2] * t[0] - u[0] * t[2]),
+            v[2] + w * t[2] + (u[0] * t[1] - u[1] * t[0])};
+}
+// A placement within a frame (the board's deck) put in the world: the frame's turn then the model's,
+// and the model's place turned by the frame and moved to it.
+inline std::pair<Vec3, Quat> within(const Vec3& frame_at, const Quat& frame_turn, const Vec3& at, const Quat& turn) noexcept {
+    const auto moved = rotate(frame_turn, at);
+    return {{frame_at[0] + moved[0], frame_at[1] + moved[1], frame_at[2] + moved[2]}, multiply(frame_turn, turn)};
 }
 inline Vec3 apply(const std::array<float, 12>& m, const Vec3& p) noexcept {
     return {m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3], m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7],

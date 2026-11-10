@@ -69,6 +69,13 @@ void a_model_is_turned_scaled_and_moved() {
     const auto q = apply(still, {0.5f, 0.25f, -1});
     expect(close_to(q[0], 0.5f, 1e-6f) && close_to(q[1], 0.25f, 1e-6f) && close_to(q[2], -1, 1e-6f), "no rotation is the identity");
 }
+void a_model_on_the_board_goes_with_the_deck() {
+    // A deck a quarter turn about y at (10, 0, 5); the model 0.1 m along the deck's z, turned no further.
+    const float s = std::sqrt(0.5f);
+    const auto [at, turn] = within({10, 0, 5}, {0, s, 0, s}, {0, 0, 0.1f}, {0, 0, 0, 1});
+    expect(close_to(at[0], 10.1f, 1e-5f) && close_to(at[1], 0, 1e-5f) && close_to(at[2], 5, 1e-5f), "moved along the deck's own z, turned with it");
+    expect(close_to(turn[1], s, 1e-5f) && close_to(turn[3], s, 1e-5f), "turned as the deck is");
+}
 } // namespace
 
 int main() {
@@ -76,6 +83,7 @@ int main() {
     too_few_pixels_say_nothing();
     the_estimate_holds_the_middle_of_recent_frames();
     a_model_is_turned_scaled_and_moved();
+    a_model_on_the_board_goes_with_the_deck();
     if (failures) {
         std::printf("%d world model check(s) failed\n", failures);
         return 1;

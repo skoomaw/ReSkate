@@ -327,6 +327,28 @@ std::optional<std::array<Bone, bones>> read() {
     if (!holder || s.drawn_holder != holder) return std::nullopt;
     return s.drawn;
 }
+std::optional<Bone> in_world(int bone) noexcept {
+    try {
+        if (bone < place_bone || bone > 3) return std::nullopt;
+        auto& s = used_by_plugin();
+        std::lock_guard lock(s.mutex);
+        const auto holder = holder_now.load(std::memory_order_acquire);
+        if (!holder || s.drawn_holder != holder || !s.drawn) return std::nullopt;
+        const auto& drawn = *s.drawn;
+        // The board's place is the world frame the bones hanging on it are written in (from_world in
+        // on_render_pose); the mount hangs on it and the deck on the mount (board_bone_parents).
+        Quat rotation = normalised(drawn[place_bone].rotation);
+        Vec3 at = drawn[place_bone].position;
+        for (int b = place_bone + 1; b <= bone; ++b) {
+            at = add(at, rotate(rotation, drawn[b].position));
+            rotation = normalised(multiply(rotation, drawn[b].rotation));
+        }
+        if (!finite(at) || length(at) > 1e6f) return std::nullopt;
+        return Bone{at, rotation, {1, 1, 1}};
+    } catch (...) {
+        return std::nullopt;
+    }
+}
 void tick(std::uintptr_t base, std::uintptr_t component) noexcept {
     std::uintptr_t holder{};
     try {

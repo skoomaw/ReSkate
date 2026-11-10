@@ -29,8 +29,11 @@ struct MaterialLook {
     float opacity{0.5f};                              // 0 unseen, 1 nothing shows through
 };
 struct Look {
+    // In the world; or, on the board, in the local board's deck as it is drawn that frame (its bone 3:
+    // board_pose.h), so the model goes where the deck goes with no tick between them.
     Vec3 position{};
     Quat rotation{0, 0, 0, 1};
+    bool on_board{};
     float scale{1};
     MaterialLook standard;                          // a material not named below
     std::map<std::string, MaterialLook> materials;  // by the model's material names
@@ -53,6 +56,15 @@ Info info();
 // Drawn for the next 300 ms (set it every tick) with this look, once it is loaded.
 void show(const Look& look) noexcept;
 void hide() noexcept;
+// Where the local board's deck is drawn now, for a model on the board: given by the plugin host (the
+// overlay knows nothing of the board), asked on the render thread as the model is drawn. Nothing: no
+// board, and a model on it is not drawn.
+struct Anchor {
+    Vec3 position{};
+    Quat rotation{0, 0, 0, 1};
+};
+using AnchorFn = std::optional<Anchor> (*)() noexcept;
+void set_board_anchor(AnchorFn anchor) noexcept;
 
 // ---- render thread (world_cover.cpp) -----------------------------------------------------------------
 // Whether there is something to draw this frame: world_cover goes into the game's frame for it.

@@ -734,8 +734,8 @@ struct FakeGame final : Game {
         }
         std::string materials;
         for (const auto& [name, m] : l->materials) materials += std::format(" {}:{:.2f},{:.2f}", name, m.colour[0], m.opacity);
-        calls.push_back(std::format("world model show {} {:.1f} {:.1f} {:.1f} q{:.2f} s{:.2f} o{:.2f}{}", plugin, l->position[0], l->position[1], l->position[2],
-                                    l->rotation[3], l->scale, l->standard.opacity, materials));
+        calls.push_back(std::format("world model show {} {:.1f} {:.1f} {:.1f} q{:.2f} s{:.2f} o{:.2f}{}{}", plugin, l->position[0], l->position[1], l->position[2],
+                                    l->rotation[3], l->scale, l->standard.opacity, materials, l->on_board ? " on board" : ""));
         return {};
     }
     // One plugin's viewmodel at a time, as the real one.
@@ -4335,6 +4335,7 @@ void plugins_show_a_world_model() {
         assert(reskate.world_model.show({position = vector.create(1, 2, 3), rotation = {0, 0, 0, 1}, scale = 1.5, opacity = 0.4,
             materials = {rib = {colour = vector.create(0.9, 0.9, 0.9), opacity = 0.65}}}))
         assert(not pcall(reskate.world_model.show, {}), "a position is needed")
+        assert(reskate.world_model.show({on_board = true, opacity = 0.5}), "on the board, the deck's own place")
         assert(not pcall(reskate.world_model.show, {position = vector.create(0, 0, 0), opacity = 2}), "opacity 0 to 1")
         assert(not pcall(reskate.world_model.show, {position = vector.create(0, 0, 0), rotation = {0, 0, 0, 0}}), "a unit quaternion")
         assert(not pcall(reskate.world_model.show, {position = vector.create(0, 0, 0), materials = {{opacity = 1}}}), "materials by name")
@@ -4346,6 +4347,7 @@ void plugins_show_a_world_model() {
     running(host, "snowskate", environment);
     check(environment.logged("[snowskate] frosted"), "A world model's calls work\n" + environment.all());
     check(game.called("world model load snowskate tread.rsvm") && game.called("world model show snowskate 1.0 2.0 3.0 q1.00 s1.50 o0.40 rib:0.90,0.65") &&
+              game.called("world model show snowskate 0.0 0.0 0.0 q1.00 s1.00 o0.50 on board") &&
               game.called("world model hide snowskate"),
           "Loaded, shown where asked with its materials, and hidden\n" + environment.all());
     host.apply({package("snowskate", {{manifest_file, manifest(R"("world.model")")}, {"plugin/main.lua", main}, {"models/tread.rsvm", "RSVM"}}),

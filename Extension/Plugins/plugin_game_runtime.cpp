@@ -1341,6 +1341,12 @@ public:
         return ViewmodelBone{found->position, found->x, found->y, found->z};
     }
     // ---- world model ---------------------------------------------------------------------------------
+    // Where the local board's deck is drawn now (board_pose.h), for a world model on the board.
+    static std::optional<world_model::Anchor> deck_anchor() noexcept {
+        const auto deck = board_pose::in_world(3);
+        if (!deck) return std::nullopt;
+        return world_model::Anchor{deck->position, deck->rotation};
+    }
     std::string world_model_load(std::string_view plugin, const std::filesystem::path& file) override {
         if (!world_modeler_.empty() && world_modeler_ != plugin) return world_modeler_ + " has the world model";
         world_modeler_ = plugin;
@@ -1371,6 +1377,8 @@ public:
         world_model::Look w;
         w.position = look->position;
         w.rotation = look->rotation;
+        w.on_board = look->on_board;
+        if (w.on_board) world_model::set_board_anchor(&deck_anchor);
         w.scale = look->scale;
         w.glance = look->glance;
         w.standard = {look->standard.colour, look->standard.opacity};

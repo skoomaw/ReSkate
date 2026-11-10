@@ -6,6 +6,7 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -14,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <tuple>
 
 // world_model.h says what this does.
 namespace dingosdk::world_model {
@@ -39,6 +41,7 @@ Shared& shared() {
     static auto* value = new Shared;
     return *value;
 }
+std::atomic<AnchorFn> board_anchor{};
 
 void read_in_background(std::filesystem::path file, std::uint64_t serial) {
     std::string why, bytes;
@@ -417,6 +420,7 @@ void hide() noexcept {
     std::lock_guard lock(s.mutex);
     s.until = 0;
 }
+void set_board_anchor(AnchorFn anchor) noexcept { board_anchor.store(anchor); }
 
 bool wanted() noexcept {
     auto& s = shared();
@@ -458,7 +462,16 @@ bool record(const Frame& f) noexcept {
         depth.Format = f.depth_format;
         f.device->CreateShaderResourceView(f.depth, &depth, view);
 
-        const auto place = placement(look.position, look.rotation, std::clamp(look.scale, 0.01f, 100.0f));
+        // On the board: within the deck as the game draws it now (the anchor), else not at all.
+        auto at = look.position;
+        auto turn = look.rotation;
+        if (look.on_board) {
+            std::optional<Anchor> anchor;
+            if (const auto anchor_fn = board_anchor.load()) anchor = anchor_fn();
+            if (!anchor) return false;
+            std::tie(at, turn) = within(anchor->position, anchor->rotation, look.position, look.rotation);
+        }
+        const auto place = placement(at, turn, std::clamp(look.scale, 0.01f, 100.0f));
         const auto& m = f.camera;
         const std::array<float, frame_constants> constants{
             place[0], place[1], place[2], place[3], place[4], place[5], place[6], place[7], place[8], place[9], place[10], place[11],

@@ -76,15 +76,21 @@ struct WorldModelApi {
         }
         return 1;
     }
-    // show({position = vector, rotation = {x, y, z, w}, scale = 1, colour = vector, opacity = 0.5, glance = 0.5,
-    // materials = {[name] = {colour, opacity}}}): drawn for the next 300 ms (so every tick). colour and
-    // opacity are for a material not named in materials.
+    // show({position = vector, rotation = {x, y, z, w}, on_board = false, scale = 1, colour = vector, opacity = 0.5,
+    // glance = 0.5, materials = {[name] = {colour, opacity}}}): drawn for the next 300 ms (so every tick). colour
+    // and opacity are for a material not named in materials. on_board: position and rotation are within the
+    // local board's deck as it is drawn each frame (the deck's own place when position is left out), so the
+    // model goes with the board; nothing is drawn without a board.
     static int show(lua_State* L) {
         auto& plugin = caller(L, "reskate.world_model.show");
         luaL_checktype(L, 1, LUA_TTABLE);
         Game::WorldModelLook look;
+        lua_getfield(L, 1, "on_board");
+        look.on_board = lua_toboolean(L, -1) != 0;
+        lua_pop(L, 1);
         lua_getfield(L, 1, "position");
-        look.position = position_of(L, lua_gettop(L), "the world model's position");
+        // On the board the position is within the deck, and the deck itself when it is not given.
+        if (!look.on_board || !lua_isnil(L, -1)) look.position = position_of(L, lua_gettop(L), "the world model's position");
         lua_pop(L, 1);
         lua_getfield(L, 1, "rotation");
         if (!lua_isnil(L, -1)) {
