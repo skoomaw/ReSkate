@@ -1,0 +1,46 @@
+name: Build
+
+# Builds ReSkate (ReSkate.dll, the launcher and the server) on Windows and keeps the Release
+# output as a downloadable artifact on the run's page.
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Spotify device (SpotifyHelper/) is built by cargo; the runner has Rust installed.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            SpotifyHelper/target
+          key: cargo-${{ hashFiles('SpotifyHelper/Cargo.lock') }}
+
+      - name: Configure
+        run: cmake --preset vs2022-x64
+
+      - name: Build
+        run: cmake --build --preset release --parallel 4
+
+      - name: Collect
+        shell: pwsh
+        run: |
+          $out = "artifacts/ReSkate"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Get-ChildItem build/vs2022-x64/Release -File |
+            Where-Object { $_.Extension -in '.dll', '.exe' } |
+            Copy-Item -Destination $out
+          Get-ChildItem $out
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReSkate-${{ github.ref_name }}-${{ github.sha }}
+          path: artifacts/ReSkate
+          if-no-files-found: error
