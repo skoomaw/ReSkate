@@ -74,6 +74,7 @@ struct Notes {
     D3D12_RESOURCE_STATES depth_state{}; // the main depth's state when the list ends
     bool unsafe{};         // a split or aliasing barrier on the colour or depth: no cover this frame
     std::uint64_t last_written{}; // the kind (format, flags, compute or drawn) of the last full-size float picture written on it
+    std::vector<std::string> events; // while tracing: what happened on it to the depth and the big float pictures
 };
 
 struct Shared {
@@ -138,6 +139,14 @@ struct Shared {
     bool tried{};               // the cover's moment came this frame
     std::map<std::string, unsigned> outcomes;
     unsigned outcome_frames{}, outcome_reports{};
+    // A trace of six frames, once, about two seconds after the picture is chosen: every batch the game
+    // submits, in order, with what happened in it to the depth and to every big float picture, and
+    // where the cover went in. Said in the log, to see why the cover shows on some frames only.
+    unsigned frames_since_lock{}, trace_frames_left{}, quiet_batches{};
+    bool traced{};
+    std::vector<std::string> trace_lines;
+    std::map<ID3D12Resource*, int> trace_ids;
+    std::vector<std::string> trace_names; // each traced picture as first seen, by id
 };
 Shared& shared() { static auto* value = new Shared; return *value; }
 
@@ -148,6 +157,7 @@ std::atomic<std::size_t> next_depth_handle{};
 std::atomic<ID3D12Resource*> main_depth_now{};
 std::atomic<ID3D12Resource*> colour_now{};
 std::atomic<bool> active{}; // wanted, and installed
+std::atomic<bool> tracing{}; // the six traced frames are being recorded
 // Our own command list: its barriers go through the same hook as the game's and are not the game's.
 std::atomic<ID3D12GraphicsCommandList*> our_list{};
 
@@ -298,6 +308,38 @@ void STDMETHODCALLTYPE hooked_render_pass(ID3D12GraphicsCommandList4* list, UINT
 
 bool record_cover(Shared& s);
 
+// Under the lock. A short name for a picture in the trace: #1, #2, ...
+// `d`, when given, describes it the first time (the picture may be gone when the trace ends).
+int trace_id(Shared& s, ID3D12Resource* r, const D3D12_RESOURCE_DESC* d = nullptr) {
+    const auto at = s.trace_ids.find(r);
+    if (at != s.trace_ids.end()) return at->second;
+    const int id = static_cast<int>(s.trace_ids.size()) + 1;
+    s.trace_ids.emplace(r, id);
+    s.trace_names.push_back(d ? std::format("#{} {}x{} format {}{}", id, d->Width, d->Height, static_cast<unsigned>(d->Format),
+                                            r == main_depth_now.load() ? " (the world's depth)" : "")
+                              : std::format("#{}", id));
+    return id;
+}
+// Under the lock: a batch's events as one trace line (or counted as quiet).
+void trace_batch(Shared& s, bool ours_queue, UINT count, ID3D12CommandList* const* lists) {
+    std::string line;
+    for (UINT i = 0; i < count; ++i) {
+        const auto found = s.notes.find(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
+        if (found == s.notes.end() || found->second.events.empty()) continue;
+        line += std::format(" [list {}:", i);
+        for (const auto& e : found->second.events) line += " " + e + ";";
+        line += "]";
+        found->second.events.clear();
+    }
+    if (line.empty()) {
+        ++s.quiet_batches;
+        return;
+    }
+    if (s.quiet_batches) s.trace_lines.push_back(std::format("  ({} batch(es) with nothing traced)", s.quiet_batches));
+    s.quiet_batches = 0;
+    s.trace_lines.push_back(std::format("  batch of {} on {}:{}", count, ours_queue ? "the direct queue" : "ANOTHER queue", line));
+}
+
 void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
     const auto original = original_execute.load();
     if (!active.load(std::memory_order_relaxed) || !lists || !count) return original(queue, count, lists);
@@ -305,6 +347,10 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
         auto& s = shared();
         std::unique_lock lock(s.mutex);
         if (queue != s.queue) {
+            if (tracing.load()) {
+                trace_batch(s, false, count, lists);
+                for (UINT i = 0; i < count; ++i) s.notes.erase(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
+            }
             lock.unlock();
             return original(queue, count, lists);
         }
@@ -319,7 +365,14 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
             s.tried = true;
             s.why = !s.colour_state_known ? "the picture's state not known" : s.unsafe ? "a split or aliasing barrier, or another queue"
                   : s.depth_elsewhere ? "the depth moved on another queue" : nullptr;
-            if (!s.why && record_cover(s)) {
+            const bool drew = !s.why && record_cover(s);
+            if (tracing.load()) {
+                if (s.quiet_batches) s.trace_lines.push_back(std::format("  ({} batch(es) with nothing traced)", s.quiet_batches));
+                s.quiet_batches = 0;
+                s.trace_lines.push_back(drew ? std::format("  >> COVER drawn into #{} (it was in state 0x{:x})", trace_id(s, s.colour), static_cast<unsigned>(s.colour_state))
+                                             : std::format("  >> cover not drawn: {}", s.why ? s.why : "?"));
+            }
+            if (drew) {
                 s.drawn = true;
                 ID3D12CommandList* ours[] = {s.list.Get()};
                 original(queue, 1, ours);
@@ -331,6 +384,7 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
                 }
             }
         }
+        if (tracing.load()) trace_batch(s, true, count, lists);
         for (UINT i = 0; i < count; ++i) {
             const auto found = s.notes.find(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
             if (found == s.notes.end()) continue;
@@ -731,6 +785,31 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
                 s.outcome_frames = 0;
             }
         }
+        // The trace: started 120 frames after the picture is chosen, said frame by frame, six frames.
+        if (s.locked && !s.traced && !tracing.load() && ++s.frames_since_lock == 120) {
+            s.trace_frames_left = 6;
+            s.trace_lines.clear();
+            s.trace_ids.clear();
+            s.trace_names.clear();
+            s.quiet_batches = 0;
+            tracing.store(true);
+            logging::write(logging::Level::info, logging::Channel::graphics,
+                           "World cover: trace of 6 frames follows (#n are the big float pictures and the depth, by first sight; states in hex).");
+        } else if (tracing.load()) {
+            if (s.quiet_batches) s.trace_lines.push_back(std::format("  ({} batch(es) with nothing traced)", s.quiet_batches));
+            s.quiet_batches = 0;
+            logging::write(logging::Level::info, logging::Channel::graphics,
+                           std::format("World cover trace, frame {} of 6 ({}), then the present:", 7 - s.trace_frames_left, s.drawn ? "cover drawn" : "cover NOT drawn"));
+            for (const auto& line : s.trace_lines) logging::write(logging::Level::info, logging::Channel::graphics, "World cover trace" + line);
+            s.trace_lines.clear();
+            if (--s.trace_frames_left == 0) {
+                tracing.store(false);
+                s.traced = true;
+                std::string names = "World cover trace: pictures:";
+                for (const auto& name : s.trace_names) names += " " + name + ";";
+                logging::write(logging::Level::info, logging::Channel::graphics, names);
+            }
+        }
         s.tried = false;
         s.why = nullptr;
         // The picture the cover goes into: voted for over 30 frames, then kept while it is still written.
@@ -815,6 +894,23 @@ void release() noexcept {
 void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b, BarrierFn /*original*/) noexcept {
     if (!active.load(std::memory_order_relaxed) || list == our_list.load(std::memory_order_relaxed)) return;
     try {
+        // While tracing: every transition of the depth or of a big float picture, on any list.
+        if (tracing.load(std::memory_order_relaxed) && b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION && b.Transition.pResource) {
+            const auto d = b.Transition.pResource->GetDesc();
+            const bool depth = (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) != 0;
+            if (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && (depth || hdr_view_format(d.Format) != DXGI_FORMAT_UNKNOWN)) {
+                auto& s = shared();
+                std::lock_guard lock(s.mutex);
+                if (d.Width * 2 >= s.width && d.Height * 2 >= s.height) {
+                    auto& n = s.notes[list];
+                    if (n.events.size() < 32)
+                        n.events.push_back(std::format("{}#{} 0x{:x}>0x{:x}{}", list->GetType() == D3D12_COMMAND_LIST_TYPE_DIRECT ? "" : "(compute) ",
+                                                       trace_id(s, b.Transition.pResource, &d), static_cast<unsigned>(b.Transition.StateBefore),
+                                                       static_cast<unsigned>(b.Transition.StateAfter),
+                                                       b.Flags == D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY ? " begin" : b.Flags == D3D12_RESOURCE_BARRIER_FLAG_END_ONLY ? " end" : ""));
+                }
+            }
+        }
         auto* const colour = colour_now.load(std::memory_order_relaxed);
         // Memory aliased onto (or off) the world's colour: it is not ours to touch this frame.
         if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
