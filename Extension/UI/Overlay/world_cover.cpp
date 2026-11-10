@@ -11,6 +11,7 @@
 #include <cstring>
 #include <format>
 #include <mutex>
+#include <map>
 #include <set>
 #include <string>
 #include <type_traits>
@@ -72,6 +73,7 @@ struct Notes {
     bool depth_state_known{};
     D3D12_RESOURCE_STATES depth_state{}; // the main depth's state when the list ends
     bool unsafe{};         // a split or aliasing barrier on the colour or depth: no cover this frame
+    ID3D12Resource* first_written{}; // the first full-size float picture written on it
 };
 
 struct Shared {
@@ -115,6 +117,19 @@ struct Shared {
     unsigned presents_wanted{}; // presents while the cover was wanted and allowed (for the log)
     std::set<std::string> bindings_said; // what the game binds with the world's depth, said once each
     std::set<ID3D12Resource*> pictures_said; // full-size float pictures seen written, said once each
+    // The game writes more than one full-size float picture a frame (the lit world, then others made
+    // from it). Drawing into whichever came last made the cover flicker (2026-11-10), so it locks onto
+    // one: the picture written first in most of 30 frames, the lit world before anything is made of it.
+    struct Vote {
+        unsigned count{};
+        DXGI_FORMAT format{};
+    };
+    std::map<ID3D12Resource*, Vote> votes;
+    ID3D12Resource* frame_first{}; // this frame's first picture written, as its lists are submitted
+    ID3D12Resource* locked{};
+    DXGI_FORMAT locked_format{};
+    bool locked_seen{};
+    unsigned frames_voted{}, locked_missed{};
 };
 Shared& shared() { static auto* value = new Shared; return *value; }
 
@@ -240,7 +255,7 @@ void note_targets(ID3D12GraphicsCommandList* list, UINT count, SIZE_T first_colo
         if (s.bindings_said.insert(kind).second)
             logging::write(logging::Level::info, logging::Channel::graphics, "World cover: with the world's depth, " + kind + ".");
     }
-    if (!fits) return;
+    if (!fits || (s.locked && view->resource != s.locked)) return;
     auto& n = s.notes[list];
     n.world = true;
     n.colour = view->resource;
@@ -314,6 +329,8 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
                 s.depth_state = n.depth_state;
             }
             if (n.unsafe) s.unsafe = true;
+            if (n.first_written && !s.frame_first) s.frame_first = n.first_written;
+            if (n.first_written == s.locked || (n.world && n.colour == s.locked)) s.locked_seen = true;
             if (n.world) {
                 s.colour = n.colour;
                 s.pending = !s.drawn;
@@ -672,6 +689,39 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
         }
         s.width = width, s.height = height;
         s.main_missed = s.main_seen ? 0 : s.main_missed + 1;
+        // The picture the cover goes into: voted for over 30 frames, then kept while it is still written.
+        if (s.frame_first) {
+            ++s.votes[s.frame_first].count;
+            ++s.frames_voted;
+        }
+        if (s.locked) {
+            s.locked_missed = s.locked_seen ? 0 : s.locked_missed + 1;
+            if (s.locked_missed > 120) {
+                logging::write(logging::Level::info, logging::Channel::graphics, "World cover: the world's picture is no longer written; choosing again.");
+                s.locked = nullptr;
+                colour_now.store(nullptr);
+                s.votes.clear();
+                s.frames_voted = 0;
+            }
+        } else if (s.frames_voted >= 30) {
+            const auto best = std::max_element(s.votes.begin(), s.votes.end(),
+                                               [](const auto& a, const auto& b) { return a.second.count < b.second.count; });
+            if (best != s.votes.end() && best->second.count >= 20 && best->second.format != DXGI_FORMAT_UNKNOWN) {
+                s.locked = best->first;
+                s.locked_format = best->second.format;
+                s.colour_format = best->second.format;
+                s.locked_missed = 0;
+                s.said_colour = true;
+                colour_now.store(s.locked);
+                logging::printf(logging::Level::info, logging::Channel::graphics,
+                                "World cover: the world's picture is the one written first in %u of %u frames (format %u).", best->second.count,
+                                s.frames_voted, static_cast<unsigned>(best->second.format));
+            }
+            s.votes.clear();
+            s.frames_voted = 0;
+        }
+        s.frame_first = nullptr;
+        s.locked_seen = false;
         s.pending = s.drawn = s.depth_elsewhere = s.unsafe = s.main_seen = false;
         s.colour_state_known = false;
         ++s.frame;
@@ -752,7 +802,10 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
             if (!n.colour) n.colour = resource;
             // Half-way through a split barrier the picture is in no state at all.
             if (b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) n.unsafe = true;
-            if (written) n.world = true; // the picture was drawn into on this list
+            if (written) {
+                n.world = true; // the picture was drawn into on this list
+                if (!n.first_written) n.first_written = resource;
+            }
             n.colour_state_known = true;
             n.colour_state = b.Transition.StateAfter;
             return;
@@ -773,18 +826,13 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
             std::lock_guard lock(s.mutex);
             if (!s.depth_width || desc.Width != s.depth_width || desc.Height != s.depth_height) return;
             auto& n = s.notes[list];
-            n.world = true;
-            n.colour = resource;
-            n.colour_state_known = true;
-            n.colour_state = b.Transition.StateAfter;
-            s.colour_format = format;
-            colour_now.store(resource);
+            if (!n.first_written) n.first_written = resource;
+            if (s.votes.size() < 16 || s.votes.contains(resource)) s.votes[resource].format = format;
             if (s.pictures_said.size() < 8 && s.pictures_said.insert(resource).second)
                 logging::printf(logging::Level::info, logging::Channel::graphics,
                                 "World cover: a full-size float picture written (%llux%u, format %u, flags 0x%x, state 0x%x to 0x%x).",
                                 static_cast<unsigned long long>(desc.Width), desc.Height, static_cast<unsigned>(desc.Format), static_cast<unsigned>(desc.Flags),
                                 static_cast<unsigned>(b.Transition.StateBefore), static_cast<unsigned>(b.Transition.StateAfter));
-            if (!s.said_colour) s.said_colour = true;
             return;
         }
         // The main depth buffer: where it goes, so our list knows whether it can read it as it is. Nothing
