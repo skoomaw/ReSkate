@@ -77,6 +77,7 @@
 #include <filesystem>
 #include "Extension/UI/Overlay/overlay.h"
 #include "Extension/UI/Overlay/screen_look.h"
+#include "Extension/UI/Overlay/world_cover.h"
 #include "Extension/UI/Overlay/viewmodel.h"
 #include "Extension/UI/Overlay/scripted_pad.h"
 #include "Engine/Game/Input/pad_output.h"
@@ -1260,6 +1261,23 @@ public:
         screen_look::set(s);
         return {};
     }
+    std::string world_cover(std::string_view plugin, std::optional<WorldCover> cover) override {
+        if (!coverer_.empty() && coverer_ != plugin) return cover ? coverer_ + " has the world's cover" : std::string{};
+        if (!cover) {
+            if (coverer_ == plugin) {
+                world_cover::clear();
+                coverer_.clear();
+            }
+            return {};
+        }
+        coverer_ = plugin;
+        world_cover::Settings s;
+        s.colour = cover->colour;
+        s.amount = cover->amount, s.facing = cover->facing, s.softness = cover->softness;
+        s.brightness = cover->brightness, s.breakup = cover->breakup, s.sparkle = cover->sparkle;
+        world_cover::set(s);
+        return {};
+    }
     // ---- viewmodel -----------------------------------------------------------------------------------
     std::string viewmodel_load(std::string_view plugin, const std::filesystem::path& file) override {
         if (!viewmodeler_.empty() && viewmodeler_ != plugin) return viewmodeler_ + " has the viewmodel";
@@ -2025,6 +2043,10 @@ public:
             screen_look::clear();
             looker_.clear();
         }
+        if (coverer_ == plugin) {
+            world_cover::clear();
+            coverer_.clear();
+        }
         if (viewmodeler_ == plugin) {
             viewmodel::unload();
             viewmodeler_.clear();
@@ -2111,6 +2133,7 @@ private:
     std::string room_owner_; // the plugin in the character room (room_open)
     std::uint64_t pose_at_{};
     std::string looker_;  // the plugin whose look is on the screen (screen_look)
+    std::string coverer_; // the plugin whose cover is over the world (world_cover)
     std::string viewmodeler_; // the plugin whose viewmodel is loaded (viewmodel_load)
     std::uint64_t look_at_{};
     std::uint64_t reach_at_{};

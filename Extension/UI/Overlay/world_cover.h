@@ -1,0 +1,60 @@
+#pragma once
+#include <array>
+#include <cstdint>
+#include <d3d12.h>
+
+// A cover over the world's upward-facing surfaces (reskate.effects.cover): snow, sand, dust, moss,
+// whatever a plugin makes of its colour. It is drawn into the game's own lit picture of the world,
+// before the game's post-processing and its UI, so menus, the HUD and the overlay are never under it
+// and the game's grading, bloom and anti-aliasing treat it as part of the world.
+//
+// How it finds that moment, from what D3D12 shows of the game's frame (no game addresses):
+// - The world's depth: the main depth buffer as the depth tap finds it (depth_tap.cpp: the first
+//   screen-shaped depth buffer each frame that goes from being written to being read), copied then,
+//   on the game's own command list, into a buffer of ours, as the tap copies it.
+// - The world's colour: the render target bound together with that depth buffer (OMSetRenderTargets)
+//   whose format is a floating-point one: the lit, not yet tone-mapped picture. The G-buffer's
+//   targets are not floating point and the UI never draws with the world's depth bound, so neither is
+//   taken for it.
+// - When the world is finished: the first batch of command lists the game submits to its direct
+//   queue, after one in which the world was drawn, with no world drawing in it. The cover is drawn by
+//   a command list of ours submitted just before that batch, so nothing of the game's own command
+//   lists, their state or their order changes.
+// Anything not as expected (the colour's state unknown, the depth and colour not the same size, no
+// depth copy this frame, render passes instead of OMSetRenderTargets) draws nothing that frame. At
+// worst the cover is late and drawn after the game has used the picture: then it is not seen.
+//
+// The surfaces' direction comes from the depth (each pixel's neighbours) and the camera
+// (plugin_camera.h); the game's depth is reversed (1 near, 0 far: capture_image.h), so the sky (0) is
+// never covered.
+namespace dingosdk::world_cover {
+struct Settings {
+    std::array<float, 3> colour{0.92f, 0.95f, 1.0f}; // the cover's own colour, 0..1 each
+    float amount{1.0f};     // 0..1: how much of a fully covered surface it hides
+    float facing{0.55f};    // 0..1: how upward a surface must face to be covered (1 only flat ground)
+    float softness{0.15f};  // 0..0.5: how gradually the cover thins out below `facing`
+    float brightness{1.6f}; // 0.25..4: the cover's lit brightness against what it covers
+    float breakup{0.35f};   // 0..1: how patchy its edge is (world-space noise)
+    float sparkle{0.0f};    // 0..1: glints, as fresh snow has
+};
+
+// Client thread. On until clear().
+void set(const Settings& settings) noexcept;
+void clear() noexcept;
+bool on() noexcept;
+
+// Render thread (the overlay): its hooks on the game's device, its queue and the command lists'
+// shared table (through the overlay's own list), installed once with the overlay's graphics.
+void install(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* list) noexcept;
+// Each present, before the overlay draws: a new frame of the game's begins after it. `width` and
+// `height` are the back buffer's.
+void present(std::uint32_t width, std::uint32_t height) noexcept;
+// The overlay is tearing its graphics down (a resize, a lost device, stop): the cover's own
+// resources go, and it draws nothing until the next install.
+void release() noexcept;
+
+// From the depth tap's ResourceBarrier hook (depth_tap.cpp), for each barrier the game records,
+// before the game's own barrier is recorded. `original` records a barrier without the hook.
+using BarrierFn = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*);
+void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& barrier, BarrierFn original) noexcept;
+}

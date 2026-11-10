@@ -61,6 +61,7 @@ add_library(dingosdk_overlay STATIC
     Extension/UI/Overlay/screen_look.cpp
     Extension/UI/Overlay/viewmodel.cpp
     Extension/UI/Overlay/viewmodel_model.cpp
+    Extension/UI/Overlay/world_cover.cpp
 )
 # `capture depth` (DINGOSDK_DEV_TOOLS): the depth probe, a research tool.
 if(DINGOSDK_DEV_TOOLS)
@@ -132,6 +133,28 @@ if(WIN32 AND DINGOSDK_FXC)
         VERBATIM)
     add_custom_target(dingosdk_viewmodel_check DEPENDS "${viewmodel_checked}")
     add_dependencies(dingosdk_overlay dingosdk_viewmodel_check)
+endif()
+
+# A plugin's world cover (reskate.effects.cover), the same way.
+set(world_cover_hlsl_path "${PROJECT_SOURCE_DIR}/Extension/UI/Overlay/world_cover.hlsl")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${world_cover_hlsl_path}")
+file(READ "${world_cover_hlsl_path}" world_cover_hlsl_source)
+string(LENGTH "${world_cover_hlsl_source}" world_cover_hlsl_length)
+if(world_cover_hlsl_length GREATER 15000)
+    message(FATAL_ERROR "world_cover.hlsl is longer than one MSVC string literal: split it as the screen look's is")
+endif()
+configure_file(cmake/templates/world_cover_hlsl.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/world_cover_hlsl.h" @ONLY)
+if(WIN32 AND DINGOSDK_FXC)
+    set(world_cover_checked "${CMAKE_CURRENT_BINARY_DIR}/generated/world_cover.checked")
+    add_custom_command(OUTPUT "${world_cover_checked}"
+        COMMAND "${DINGOSDK_FXC}" /nologo /T vs_5_0 /E vs_main /Fo "${CMAKE_CURRENT_BINARY_DIR}/generated/world_cover_vs.cso" "${world_cover_hlsl_path}"
+        COMMAND "${DINGOSDK_FXC}" /nologo /T ps_5_0 /E ps_main /Fo "${CMAKE_CURRENT_BINARY_DIR}/generated/world_cover_ps.cso" "${world_cover_hlsl_path}"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${world_cover_checked}"
+        DEPENDS "${world_cover_hlsl_path}"
+        COMMENT "Checking the world cover's shader with fxc"
+        VERBATIM)
+    add_custom_target(dingosdk_world_cover_check DEPENDS "${world_cover_checked}")
+    add_dependencies(dingosdk_overlay dingosdk_world_cover_check)
 endif()
 
 # The window shown from the moment ReSkate loads until the game's own window appears.

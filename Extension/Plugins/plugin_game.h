@@ -326,6 +326,14 @@ public:
     virtual std::vector<std::uint64_t> effects_live(std::string_view) { return {}; }
     virtual void effects_clear(std::string_view) {}
     virtual std::pair<bool, std::uint64_t> effects_state() { return {false, 0}; }
+    // A cover over the world's upward-facing surfaces, in the world's picture before post-processing and
+    // the UI (reskate.effects.cover; Extension/UI/Overlay/world_cover.h says what each is). On this
+    // screen only, until ended; empty ends it. One plugin at a time.
+    struct WorldCover {
+        std::array<float, 3> colour{0.92f, 0.95f, 1.0f};
+        float amount{1}, facing{0.55f}, softness{0.15f}, brightness{1.6f}, breakup{0.35f}, sparkle{0};
+    };
+    virtual std::string world_cover(std::string_view /*plugin*/, std::optional<WorldCover>) { return unavailable; }
 
     virtual std::string object_physics(std::string_view, std::uint64_t, const std::optional<ObjectPhysics>&) { return unavailable; }
     virtual std::string object_velocity(std::string_view, std::uint64_t, const Vec3&) { return unavailable; }

@@ -329,6 +329,22 @@ struct FakeGame final : Game {
     }
     void effects_clear(std::string_view plugin) override { std::erase_if(effects, [&](const auto& e) { return e.second.owner == plugin; }); }
     std::pair<bool, std::uint64_t> effects_state() override { return {effects_ready, effect_epoch}; }
+    // One plugin's world cover at a time, as the real one.
+    std::string coverer;
+    std::string world_cover(std::string_view plugin, std::optional<WorldCover> c) override {
+        if (!coverer.empty() && coverer != plugin) return c ? coverer + " has the world's cover" : std::string{};
+        if (!c) {
+            if (coverer == plugin) {
+                coverer.clear();
+                calls.push_back(std::format("cover {} none", plugin));
+            }
+            return {};
+        }
+        coverer = plugin;
+        calls.push_back(std::format("cover {} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f}", plugin, c->colour[0], c->colour[1],
+                                    c->colour[2], c->amount, c->facing, c->softness, c->brightness, c->breakup, c->sparkle, 0.0));
+        return {};
+    }
     ObjectPhysicsClaims physics_claims;
     std::map<std::uint64_t, ObjectPhysics> object_physics_now;
     std::map<std::uint64_t, ObjectMotion> object_motion_now;
@@ -1222,6 +1238,7 @@ struct FakeGame final : Game {
         score_lines.release(plugin);
         entity_clear(plugin);
         effects_clear(plugin);
+        (void)world_cover(plugin, std::nullopt);
         viewmodel_unload(plugin);
         board_material::detail::release(declared_holds, plugin, std::nullopt, std::nullopt);
         std::vector<std::uint64_t> ids;
@@ -4637,6 +4654,53 @@ void plugins_reach_cruise_and_read_the_mouse() {
           "skater.animation, skater.read, skater.control, input and overlay are needed\n" + environment.all());
 }
 
+// A cover over the world's upward-facing surfaces (reskate.effects.cover): its values checked, one plugin's at a
+// time, ended by the plugin or by its unloading, and only with "effects".
+void plugins_cover_the_world() {
+    TestEnvironment environment;
+    auto& game = environment.fake;
+    Host host(environment, Side::client);
+    const auto snow = package("snow", {{manifest_file, manifest(R"("effects")")}, {"plugin/main.lua", R"(
+        assert(reskate.effects.cover({colour = {r = 0.9, g = 0.95, b = 1}, amount = 0.8, facing = 0.6, softness = 0.1, brightness = 2,
+            breakup = 0.5, sparkle = 0.25}))
+        assert(not pcall(reskate.effects.cover, {amount = 2}), "an amount is 0 to 1")
+        assert(not pcall(reskate.effects.cover, {facing = -0.1}), "a facing is 0 to 1")
+        assert(not pcall(reskate.effects.cover, {brightness = 9}), "a brightness is 0.25 to 4")
+        assert(not pcall(reskate.effects.cover, {colour = {r = 1, g = 2, b = 0}}), "a colour is 0 to 1 a channel")
+        assert(not pcall(reskate.effects.cover, {colour = {r = 1}}), "a colour has three channels")
+        assert(not pcall(reskate.effects.cover, 5), "a cover is a table or nil")
+        assert(reskate.effects.cover({}), "every value has a default")
+        reskate.log("covered")
+    )"}});
+    host.apply({snow});
+    ticks(host, environment, 1);
+    running(host, "snow", environment);
+    check(environment.logged("[snow] covered"), "A cover's values are checked\n" + environment.all());
+    check(game.called("cover snow 0.90 0.95 1.00 0.80 0.60 0.10 2.00 0.50 0.25 0.00") &&
+              game.called("cover snow 0.92 0.95 1.00 1.00 0.55 0.15 1.60 0.35 0.00 0.00"),
+          "The cover as asked, and its defaults\n" + environment.all());
+    // A second plugin is told whose cover it is; nil from it does not end the first one's.
+    host.apply({snow, package("sand", {{manifest_file, manifest(R"("effects")")}, {"plugin/main.lua", R"(
+        local ok, why = reskate.effects.cover({colour = {r = 0.8, g = 0.7, b = 0.5}})
+        reskate.log(tostring(ok) .. " " .. tostring(why))
+        assert(reskate.effects.cover(nil))
+    )"}})});
+    ticks(host, environment, 1);
+    check(environment.logged("[sand] nil snow has the world's cover") && !game.called("cover sand none") && game.coverer == "snow",
+          "One plugin's cover at a time\n" + environment.all());
+    // Without the permission it is refused.
+    host.apply({snow, package("sneaky", {{manifest_file, manifest()}, {"plugin/main.lua", R"(
+        reskate.log(tostring(pcall(reskate.effects.cover, {})) .. " " .. tostring(pcall(reskate.effects.cover, nil)))
+    )"}})});
+    ticks(host, environment, 1);
+    check(environment.logged("[sneaky] false false"), "effects is needed for a cover\n" + environment.all());
+    check(game.coverer == "snow", "A refused plugin does not take the cover");
+    // Unloading the plugin ends its cover.
+    host.apply({});
+    ticks(host, environment, 1);
+    check(game.called("cover snow none") && game.coverer.empty(), "Unloading the plugin ends its cover\n" + environment.all());
+}
+
 // What the Filmer's port needs besides: something carried (seen by the others only), a pose only you
 // see, a step in the camera height cycle and its event, the nametags held off, the board hidden from
 // everyone, and a camcorder in the hand wear slot.
@@ -7148,6 +7212,7 @@ int main() {
         run(plugins_set_the_flip_speed);
         run(plugins_show_a_viewmodel);
         run(plugins_carry_and_take_a_step_in_the_camera_cycle);
+        run(plugins_cover_the_world);
         run(plugins_read_joints_and_tune_physics);
         run(plugins_type_and_use_the_room);
         run(plugins_read_menu_pose);
