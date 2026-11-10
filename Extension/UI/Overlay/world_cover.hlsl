@@ -82,18 +82,24 @@ float4 ps_main(Vertex input) : SV_Target {
     if (cover <= 0.002) discard;
 
     // Lit as what it covers is lit, without its colour: so a shadow on the ground is a shadow on the
-    // snow, and the game's exposure holds for both. The light is taken over a wide patch around the
-    // pixel, not from the pixel alone, or the ground's own pattern (paving, cracks, its texture) shows
-    // through as grey: a blanket of snow hides it (2026-11-10).
+    // snow, and the game's exposure holds for both. Not from the pixel alone, or the ground's own
+    // pattern (paving joints, cracks) shows through as grey: the brightest of a few close samples on the
+    // same surface (as deep as this pixel), so dark joints vanish under the snow. Close, and the same
+    // surface only: a wide ring of samples copied the skater and shadow edges onto the snow around them
+    // eight times over (2026-11-10).
     const int2 size = int2(up_width.w, back_height.w);
-    float wide = 0;
-    [unroll] for (int i = 0; i < 8; ++i) {
-        const float angle = i * 0.7853982;
-        const float2 way = float2(cos(angle), sin(angle));
-        wide += luminance(scene.Load(int3(clamp(p + int2(way * back_height.w * 0.012), int2(0, 0), size - 1), 0)).rgb);
-        wide += luminance(scene.Load(int3(clamp(p + int2(way * back_height.w * 0.03), int2(0, 0), size - 1), 0)).rgb);
+    const float reach = max(back_height.w * 0.006, 2.0);
+    float light = luminance(under.rgb);
+    float base = light;
+    [unroll] for (int i = 0; i < 12; ++i) {
+        const float angle = i * 0.5235988 + (i & 1) * 0.26;
+        const float2 way = float2(cos(angle), sin(angle)) * reach * ((i & 1) ? 1.0 : 0.5);
+        const int2 at = clamp(p + int2(way), int2(0, 0), size - 1);
+        const float there = depth_at(at);
+        if (abs(there - d) > d * 0.02) continue; // another surface: the skater, a pole, a kerb's edge
+        light = max(light, luminance(scene.Load(int3(at, 0)).rgb));
     }
-    const float light = lerp(wide / 16, luminance(under.rgb), 0.15);
+    light = lerp(light, base, 0.1);
     float3 lit = colour_amount.rgb * light * shape.z;
     if (extra.x > 0) {
         const float glint = hash(floor(here.xz * 38.0) + floor(here.y * 38.0));
