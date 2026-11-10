@@ -9,7 +9,9 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <format>
 #include <mutex>
+#include <set>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -22,7 +24,7 @@ using Microsoft::WRL::ComPtr;
 
 // Slots of the D3D12 interfaces' tables (d3d12.h's declaration order).
 constexpr std::size_t device_create_rtv = 20, device_create_dsv = 21, device_copy_descriptors = 23, device_copy_simple = 24;
-constexpr std::size_t list_set_targets = 46, queue_execute = 10;
+constexpr std::size_t list_set_targets = 46, list_begin_render_pass = 68, queue_execute = 10;
 constexpr UINT constant_count = 28;
 
 using CreateViewFn = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, const void*, D3D12_CPU_DESCRIPTOR_HANDLE);
@@ -36,6 +38,9 @@ std::atomic<CreateViewFn> original_rtv{}, original_dsv{};
 std::atomic<CopyDescriptorsFn> original_copy{};
 std::atomic<CopySimpleFn> original_copy_simple{};
 std::atomic<SetTargetsFn> original_targets{};
+using RenderPassFn = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList4*, UINT, const D3D12_RENDER_PASS_RENDER_TARGET_DESC*,
+                                              const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC*, D3D12_RENDER_PASS_FLAGS);
+std::atomic<RenderPassFn> original_render_pass{};
 std::atomic<ExecuteFn> original_execute{};
 
 // What a plugin asked for (client thread).
@@ -108,6 +113,7 @@ struct Shared {
     UINT64 fence_value{};
     bool failed{}, said_drawn{}, said_late{}, said_depth{}, said_colour{}, said_waiting{};
     unsigned presents_wanted{}; // presents while the cover was wanted and allowed (for the log)
+    std::set<std::string> bindings_said; // what the game binds with the world's depth, said once each
 };
 Shared& shared() { static auto* value = new Shared; return *value; }
 
@@ -200,32 +206,69 @@ void STDMETHODCALLTYPE hooked_copy(ID3D12Device* device, UINT to_count, const D3
     } catch (...) {}
 }
 
+// A floating-point colour format a view of this format reads as, or UNKNOWN: a typeless view takes
+// its family's float format.
+DXGI_FORMAT hdr_view_format(DXGI_FORMAT f) {
+    if (hdr_format(f)) return f;
+    if (f == DXGI_FORMAT_R16G16B16A16_TYPELESS) return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if (f == DXGI_FORMAT_R32G32B32A32_TYPELESS) return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    return DXGI_FORMAT_UNKNOWN;
+}
+
+// Targets bound with the world's depth (OMSetRenderTargets or BeginRenderPass): the first colour target,
+// if it is a floating-point picture the depth's size, is the world's picture.
+void note_targets(ID3D12GraphicsCommandList* list, UINT count, SIZE_T first_colour, const char* how) {
+    auto& s = shared();
+    std::lock_guard lock(s.mutex);
+    const View* view{};
+    if (count) {
+        const auto found = s.rtvs.find(first_colour);
+        if (found != s.rtvs.end() && found->second.resource) view = &found->second;
+    }
+    D3D12_RESOURCE_DESC desc{};
+    if (view) desc = view->resource->GetDesc();
+    const DXGI_FORMAT format = view ? hdr_view_format(view->format != DXGI_FORMAT_UNKNOWN ? view->format : desc.Format) : DXGI_FORMAT_UNKNOWN;
+    const bool fits = view && format != DXGI_FORMAT_UNKNOWN && desc.Width == s.depth_width && desc.Height == s.depth_height &&
+                      desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.SampleDesc.Count == 1 && desc.DepthOrArraySize == 1;
+    // What the game binds with the world's depth, each kind said once (at most 12), while no picture is found.
+    if (!s.said_colour && s.bindings_said.size() < 12) {
+        const std::string kind = !count ? std::format("{}: depth only", how)
+                                 : !view ? std::format("{}: {} target(s), the first a view not known", how, count)
+                                         : std::format("{}: {} target(s), the first {}x{} in view format {} (resource format {})", how, count, desc.Width,
+                                                       desc.Height, static_cast<unsigned>(view->format), static_cast<unsigned>(desc.Format));
+        if (s.bindings_said.insert(kind).second)
+            logging::write(logging::Level::info, logging::Channel::graphics, "World cover: with the world's depth, " + kind + ".");
+    }
+    if (!fits) return;
+    auto& n = s.notes[list];
+    n.world = true;
+    n.colour = view->resource;
+    n.colour_state_known = true; // bound as a target: in RENDER_TARGET now
+    n.colour_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    s.colour_format = format;
+    if (!s.said_colour) {
+        s.said_colour = true;
+        logging::printf(logging::Level::info, logging::Channel::graphics, "World cover: the world's picture is %llux%u, format %u, %u mip level(s) (%s).",
+                        static_cast<unsigned long long>(desc.Width), desc.Height, static_cast<unsigned>(format), static_cast<unsigned>(desc.MipLevels), how);
+    }
+    colour_now.store(n.colour);
+}
+
 void STDMETHODCALLTYPE hooked_targets(ID3D12GraphicsCommandList* list, UINT count, const D3D12_CPU_DESCRIPTOR_HANDLE* colours, BOOL single_range,
                                       const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
     original_targets.load()(list, count, colours, single_range, depth);
-    if (!active.load(std::memory_order_relaxed) || !depth || !count || !colours || !is_depth_handle(depth->ptr)) return;
+    if (!active.load(std::memory_order_relaxed) || !depth || !is_depth_handle(depth->ptr)) return;
     try {
-        auto& s = shared();
-        std::lock_guard lock(s.mutex);
-        const auto found = s.rtvs.find(colours[0].ptr);
-        if (found == s.rtvs.end() || !found->second.resource || !hdr_format(found->second.format)) return;
-        const auto desc = found->second.resource->GetDesc();
-        if (desc.Width != s.depth_width || desc.Height != s.depth_height || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-            desc.SampleDesc.Count != 1 || desc.DepthOrArraySize != 1)
-            return;
-        auto& n = s.notes[list];
-        n.world = true;
-        n.colour = found->second.resource;
-        n.colour_state_known = true; // bound as a target: in RENDER_TARGET now
-        n.colour_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        s.colour_format = found->second.format;
-        if (!s.said_colour) {
-            s.said_colour = true;
-            logging::printf(logging::Level::info, logging::Channel::graphics, "World cover: the world's picture is %llux%u, format %u, %u mip level(s).",
-                            static_cast<unsigned long long>(desc.Width), desc.Height, static_cast<unsigned>(found->second.format),
-                            static_cast<unsigned>(desc.MipLevels));
-        }
-        colour_now.store(n.colour);
+        note_targets(list, colours ? count : 0, count && colours ? colours[0].ptr : 0, "OMSetRenderTargets");
+    } catch (...) {}
+}
+
+void STDMETHODCALLTYPE hooked_render_pass(ID3D12GraphicsCommandList4* list, UINT count, const D3D12_RENDER_PASS_RENDER_TARGET_DESC* colours,
+                                          const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* depth, D3D12_RENDER_PASS_FLAGS flags) {
+    original_render_pass.load()(list, count, colours, depth, flags);
+    if (!active.load(std::memory_order_relaxed) || !depth || !is_depth_handle(depth->cpuDescriptor.ptr)) return;
+    try {
+        note_targets(list, colours ? count : 0, count && colours ? colours[0].cpuDescriptor.ptr : 0, "BeginRenderPass");
     } catch (...) {}
 }
 
@@ -591,6 +634,12 @@ void install(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12GraphicsComm
                     hook(device_table[device_copy_simple], reinterpret_cast<void*>(&hooked_copy_simple), original_copy_simple, "CopyDescriptorsSimple") &&
                     hook(list_table[list_set_targets], reinterpret_cast<void*>(&hooked_targets), original_targets, "OMSetRenderTargets") &&
                     hook(queue_table[queue_execute], reinterpret_cast<void*>(&hooked_execute), original_execute, "ExecuteCommandLists");
+    // Render passes (ID3D12GraphicsCommandList4) bind targets too; only when the runtime's lists have them.
+    ComPtr<ID3D12GraphicsCommandList4> list4;
+    if (ok && SUCCEEDED(list->QueryInterface(IID_PPV_ARGS(&list4))) && list4) {
+        auto* const table4 = *reinterpret_cast<void***>(list4.Get());
+        (void)hook(table4[list_begin_render_pass], reinterpret_cast<void*>(&hooked_render_pass), original_render_pass, "BeginRenderPass");
+    }
     if (!ok) say_failed("its D3D12 hooks are not all in place.");
     else logging::write(logging::Level::info, logging::Channel::graphics, "World cover: hooks installed.");
 }
