@@ -47,6 +47,8 @@ float noise(float2 p) {
     return lerp(lerp(hash(i), hash(i + float2(1, 0)), u.x), lerp(hash(i + float2(0, 1)), hash(i + float2(1, 1)), u.x), u.y);
 }
 
+float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
 float4 ps_main(Vertex input) : SV_Target {
     const int2 p = int2(input.position.xy);
     const float4 under = scene.Load(int3(p, 0));
@@ -79,9 +81,19 @@ float4 ps_main(Vertex input) : SV_Target {
     const float cover = smoothstep(facing - softness, facing + softness, normal.y) * colour_amount.w;
     if (cover <= 0.002) discard;
 
-    // Lit as what it covers is lit: its brightness, without its colour, so a shadow on the ground is a
-    // shadow on the snow and the game's exposure holds for both.
-    const float light = dot(under.rgb, float3(0.2126, 0.7152, 0.0722));
+    // Lit as what it covers is lit, without its colour: so a shadow on the ground is a shadow on the
+    // snow, and the game's exposure holds for both. The light is taken over a wide patch around the
+    // pixel, not from the pixel alone, or the ground's own pattern (paving, cracks, its texture) shows
+    // through as grey: a blanket of snow hides it (2026-11-10).
+    const int2 size = int2(up_width.w, back_height.w);
+    float wide = 0;
+    [unroll] for (int i = 0; i < 8; ++i) {
+        const float angle = i * 0.7853982;
+        const float2 way = float2(cos(angle), sin(angle));
+        wide += luminance(scene.Load(int3(clamp(p + int2(way * back_height.w * 0.012), int2(0, 0), size - 1), 0)).rgb);
+        wide += luminance(scene.Load(int3(clamp(p + int2(way * back_height.w * 0.03), int2(0, 0), size - 1), 0)).rgb);
+    }
+    const float light = lerp(wide / 16, luminance(under.rgb), 0.15);
     float3 lit = colour_amount.rgb * light * shape.z;
     if (extra.x > 0) {
         const float glint = hash(floor(here.xz * 38.0) + floor(here.y * 38.0));
