@@ -1,6 +1,6 @@
 // A cover over the world's upward-facing surfaces (world_cover.cpp, reskate.effects.cover), drawn over
 // the game's lit, not yet tone-mapped picture of the world. One full-screen triangle; t0 is a copy of
-// that picture, t1 the game's depth for it as 32-bit floats (reversed: 1 near, 0 far).
+// that picture, t1 the game's own depth for it (reversed: 1 near, 0 far).
 
 cbuffer constants : register(b0) {
     float4 right_focal;   // the camera's right (world), and its focal length in pixels
@@ -9,10 +9,10 @@ cbuffer constants : register(b0) {
     float4 eye_near;      // where it is, and the near distance the reversed depth is over
     float4 colour_amount; // the cover's colour, and how much of a covered surface it hides
     float4 shape;         // facing, softness, brightness, breakup
-    float4 extra;         // sparkle, the depth's row pitch in floats, unused, unused
+    float4 extra;         // sparkle, unused, unused, unused
 };
 Texture2D<float4> scene : register(t0);
-ByteAddressBuffer depth : register(t1);
+Texture2D<float> depth : register(t1);
 
 struct Vertex { float4 position : SV_Position; };
 
@@ -25,7 +25,7 @@ Vertex vs_main(uint id : SV_VertexID) {
 
 float depth_at(int2 p) {
     p = clamp(p, int2(0, 0), int2(up_width.w, back_height.w) - 1);
-    return asfloat(depth.Load((p.y * (uint)extra.y + p.x) * 4));
+    return depth.Load(int3(p, 0));
 }
 
 // The point the pixel shows, in the world. Reversed, infinite depth: distance = near / depth.

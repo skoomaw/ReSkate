@@ -64,8 +64,9 @@ struct Notes {
     ID3D12Resource* colour{};
     bool colour_state_known{};
     D3D12_RESOURCE_STATES colour_state{};
-    bool depth_copied{};   // the depth was copied into ours on it
-    bool unsafe{};         // a split or aliasing barrier on the colour: no cover this frame
+    bool depth_state_known{};
+    D3D12_RESOURCE_STATES depth_state{}; // the main depth's state when the list ends
+    bool unsafe{};         // a split or aliasing barrier on the colour or depth: no cover this frame
 };
 
 struct Shared {
@@ -83,16 +84,16 @@ struct Shared {
     DXGI_FORMAT colour_format{};
     bool colour_state_known{};
     D3D12_RESOURCE_STATES colour_state{};
-    bool depth_ready{};    // a list with a depth copy on it submitted this frame
-    bool depth_copied{};   // one recorded since the last present (as the depth tap: the first only)
-    bool unsafe{};         // this frame's colour went through a split or aliasing barrier
+    bool depth_state_known{};
+    D3D12_RESOURCE_STATES depth_state{}; // the main depth's state after the lists submitted so far
+    bool depth_elsewhere{}; // a list for another queue changed the depth's state this frame
+    bool main_seen{};      // the main depth went through a barrier since the last present
+    unsigned main_missed{}; // presents in a row it did not: after 30 another may take its place
+    bool unsafe{};         // this frame's colour or depth went through a split or aliasing barrier
     bool pending{};        // the world was drawn in a submitted batch, the cover not yet
     bool drawn{};          // the cover is drawn this frame
     std::uint64_t frame{};
-    // Ours: the depth copy, the picture's copy, the target's view, our views, our lists.
-    ComPtr<ID3D12Resource> depth_copy;
-    UINT64 depth_copy_size{};
-    UINT depth_pitch{};
+    // Ours: the picture's copy, the target's view, our views, our lists.
     ComPtr<ID3D12Resource> picture;
     D3D12_RESOURCE_DESC picture_desc{};
     ComPtr<ID3D12DescriptorHeap> views, targets;
@@ -105,7 +106,7 @@ struct Shared {
     ComPtr<ID3D12GraphicsCommandList> list;
     ComPtr<ID3D12Fence> fence;
     UINT64 fence_value{};
-    bool failed{}, said_drawn{}, said_late{};
+    bool failed{}, said_drawn{}, said_late{}, said_depth{};
 };
 Shared& shared() { static auto* value = new Shared; return *value; }
 
@@ -241,7 +242,7 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
         // The world is finished: the cover goes in just before this batch, in a list of ours.
         if (s.pending && !s.drawn && !world_here) {
             s.pending = false;
-            if (s.depth_ready && s.colour_state_known && !s.unsafe && record_cover(s)) {
+            if (s.colour_state_known && !s.unsafe && !s.depth_elsewhere && record_cover(s)) {
                 s.drawn = true;
                 ID3D12CommandList* ours[] = {s.list.Get()};
                 original(queue, 1, ours);
@@ -257,7 +258,10 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
             const auto found = s.notes.find(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
             if (found == s.notes.end()) continue;
             const auto& n = found->second;
-            if (n.depth_copied) s.depth_ready = true;
+            if (n.depth_state_known) {
+                s.depth_state_known = true;
+                s.depth_state = n.depth_state;
+            }
             if (n.unsafe) s.unsafe = true;
             if (n.world) {
                 s.colour = n.colour;
@@ -294,7 +298,7 @@ bool build_pipeline(Shared& s, DXGI_FORMAT format) {
     if (!s.root) {
         D3D12_DESCRIPTOR_RANGE range{};
         range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        range.NumDescriptors = 2; // t0 the picture, t1 the depth
+        range.NumDescriptors = 2; // t0 the picture, t1 the game's depth
         std::array<D3D12_ROOT_PARAMETER, 2> parameters{};
         parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         parameters[0].Constants.Num32BitValues = constant_count;
@@ -394,7 +398,23 @@ bool build_resources(Shared& s, const D3D12_RESOURCE_DESC& colour) {
 
 // Records our list: the picture copied, then drawn back with the cover over it. Under the lock.
 bool record_cover(Shared& s) {
-    if (s.failed || !s.colour || !s.depth_copy) return false;
+    if (s.failed || !s.colour || !s.main_depth) return false;
+    // The game's depth is read where it is, by our list, never copied or moved: only while the game
+    // itself has left it readable by pixel shaders, and only through a view its format allows.
+    const auto depth_desc = s.main_depth->GetDesc();
+    DXGI_FORMAT depth_read = DXGI_FORMAT_UNKNOWN;
+    if (depth_desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS) depth_read = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+    else if (depth_desc.Format == DXGI_FORMAT_R32_TYPELESS) depth_read = DXGI_FORMAT_R32_FLOAT;
+    if (depth_read == DXGI_FORMAT_UNKNOWN || !s.depth_state_known || !(s.depth_state & D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) ||
+        (s.depth_state & (D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_UNORDERED_ACCESS))) {
+        if (!s.said_depth) {
+            s.said_depth = true;
+            logging::printf(logging::Level::info, logging::Channel::graphics,
+                            "World cover: not drawn; the game's depth (format %u) is in state 0x%x%s at the cover's moment, not one it can be read in as it is.",
+                            static_cast<unsigned>(depth_desc.Format), static_cast<unsigned>(s.depth_state), s.depth_state_known ? "" : " (not known)");
+        }
+        return false;
+    }
     const auto colour_desc = s.colour->GetDesc();
     if (colour_desc.Width != s.depth_width || colour_desc.Height != s.depth_height) return false;
     // One plain 2D picture, which CopyResource can copy into ours as it is.
@@ -420,7 +440,7 @@ bool record_cover(Shared& s) {
         std::lock_guard lock(a.mutex);
         settings = a.settings;
     }
-    // Views: the picture's copy as the target's format reads it, and the depth copy as raw bytes.
+    // Views: the picture's copy as the target's format reads it, and the game's depth as it is.
     const UINT view_step = s.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     auto view = s.views->GetCPUDescriptorHandleForHeapStart();
     D3D12_SHADER_RESOURCE_VIEW_DESC picture_view{};
@@ -431,12 +451,11 @@ bool record_cover(Shared& s) {
     s.device->CreateShaderResourceView(s.picture.Get(), &picture_view, view);
     view.ptr += view_step;
     D3D12_SHADER_RESOURCE_VIEW_DESC depth_view{};
-    depth_view.Format = DXGI_FORMAT_R32_TYPELESS;
-    depth_view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    depth_view.Format = depth_read;
+    depth_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     depth_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    depth_view.Buffer.NumElements = static_cast<UINT>(s.depth_copy_size / 4);
-    depth_view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-    s.device->CreateShaderResourceView(s.depth_copy.Get(), &depth_view, view);
+    depth_view.Texture2D.MipLevels = 1;
+    s.device->CreateShaderResourceView(s.main_depth, &depth_view, view);
     D3D12_RENDER_TARGET_VIEW_DESC target_view{};
     target_view.Format = s.colour_format;
     target_view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
@@ -459,7 +478,7 @@ bool record_cover(Shared& s) {
         m[12], m[13], m[14], 0.1f, // the near distance: it scales distances, not directions; only the noise's size depends on it
         settings.colour[0], settings.colour[1], settings.colour[2], settings.amount,
         settings.facing, settings.softness, settings.brightness, settings.breakup,
-        settings.sparkle, static_cast<float>(s.depth_pitch / 4), 0, 0};
+        settings.sparkle, 0, 0, 0};
     ID3D12DescriptorHeap* heaps[] = {s.views.Get()};
     list->SetDescriptorHeaps(1, heaps);
     list->SetGraphicsRootSignature(s.root.Get());
@@ -493,32 +512,6 @@ bool depth_shaped(const D3D12_RESOURCE_DESC& d, std::uint32_t width, std::uint32
     return std::abs(ours - screen) < 0.02 * screen && d.Width * 2 >= width;
 }
 
-// Under the lock. The depth copy for a depth buffer of this size.
-bool make_depth_copy(Shared& s, const D3D12_RESOURCE_DESC& d) {
-    const UINT pitch = (static_cast<UINT>(d.Width) * 4 + 255) / 256 * 256;
-    const UINT64 size = UINT64{pitch} * d.Height;
-    if (s.depth_copy && s.depth_copy_size == size && s.depth_pitch == pitch) return true;
-    s.depth_copy.Reset();
-    D3D12_HEAP_PROPERTIES heap{};
-    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-    D3D12_RESOURCE_DESC bytes{};
-    bytes.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    bytes.Width = size;
-    bytes.Height = 1;
-    bytes.DepthOrArraySize = 1;
-    bytes.MipLevels = 1;
-    bytes.SampleDesc.Count = 1;
-    bytes.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    // Made on our device (the game's: the same one): made in the hook on the list's device failed for
-    // the depth probe, so the device the overlay set up with is used.
-    if (FAILED(s.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bytes, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&s.depth_copy)))) {
-        say_failed("no buffer for the depth's copy.");
-        return false;
-    }
-    s.depth_copy_size = size;
-    s.depth_pitch = pitch;
-    return true;
-}
 } // namespace
 
 void set(const Settings& settings) noexcept {
@@ -595,7 +588,8 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
                            "World cover: the world's last drawing was in the frame's last batch, so the cover had no place before post-processing.");
         }
         s.width = width, s.height = height;
-        s.pending = s.drawn = s.depth_ready = s.depth_copied = s.unsafe = false;
+        s.main_missed = s.main_seen ? 0 : s.main_missed + 1;
+        s.pending = s.drawn = s.depth_elsewhere = s.unsafe = s.main_seen = false;
         s.colour_state_known = false;
         ++s.frame;
         // Notes left from lists recorded but never submitted would otherwise grow without end.
@@ -616,8 +610,6 @@ void release() noexcept {
         s.fence.Reset();
         s.fence_value = 0;
         s.picture.Reset();
-        s.depth_copy.Reset();
-        s.depth_copy_size = 0;
         s.views.Reset();
         s.targets.Reset();
         s.pipeline.Reset();
@@ -629,11 +621,14 @@ void release() noexcept {
         s.device = nullptr;
         s.queue = nullptr;
         s.colour = nullptr;
+        s.main_depth = nullptr;
+        main_depth_now.store(nullptr);
+        s.depth_state_known = false;
         s.failed = false;
     } catch (...) {}
 }
 
-void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b, BarrierFn original) noexcept {
+void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b, BarrierFn /*original*/) noexcept {
     if (!active.load(std::memory_order_relaxed) || list == our_list.load(std::memory_order_relaxed)) return;
     try {
         auto* const colour = colour_now.load(std::memory_order_relaxed);
@@ -668,53 +663,48 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
             n.colour_state = b.Transition.StateAfter;
             return;
         }
-        // The main depth buffer the first time each frame it is done being written (a full barrier, not
-        // a split one): copied, exactly as the depth tap copies it.
+        // The main depth buffer: where it goes, so our list knows whether it can read it as it is. Nothing
+        // is ever recorded on the game's lists (a copy of the depth put on them hung the GPU).
+        if (resource == main_depth_now.load(std::memory_order_relaxed)) {
+            auto& s = shared();
+            std::lock_guard lock(s.mutex);
+            s.main_seen = true;
+            if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+                s.depth_elsewhere = true; // another queue moves it: not this frame
+                return;
+            }
+            auto& n = s.notes[list];
+            if (b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) n.unsafe = true;
+            n.depth_state_known = true;
+            n.depth_state = b.Transition.StateAfter;
+            return;
+        }
+        // Which depth buffer is the world's: the first screen-shaped one each frame that goes from being
+        // written to being read, as the depth tap finds it.
         if (!(b.Transition.StateBefore & D3D12_RESOURCE_STATE_DEPTH_WRITE)) return;
         constexpr auto read = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         if (!(b.Transition.StateAfter & read) || b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) return;
-        if (b.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES && b.Transition.Subresource != 0) return;
+        if (b.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) return;
         if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) return;
         auto& s = shared();
         std::lock_guard lock(s.mutex);
-        if (!s.device || s.depth_copied) return;
+        if (!s.device || (s.main_depth && s.main_missed < 30)) return;
         const auto desc = resource->GetDesc();
-        if (!depth_shaped(desc, s.width, s.height)) return;
-        if (resource != s.main_depth) {
-            // A new main depth buffer (a resize, a level): its views are looked for afresh.
-            s.main_depth = resource;
-            main_depth_now.store(resource);
-            for (auto& handle : depth_handles) handle.store(0);
-            for (const auto& [handle, view] : s.dsvs)
-                if (view.resource == resource) remember_depth_handle(handle);
-        }
+        if (!depth_shaped(desc, s.width, s.height) || desc.MipLevels != 1) return;
+        // A new main depth buffer (a resize, a level): its views are looked for afresh.
+        s.main_depth = resource;
+        main_depth_now.store(resource);
+        s.depth_state_known = false;
+        s.main_seen = true;
+        s.main_missed = 0;
+        for (auto& handle : depth_handles) handle.store(0);
+        for (const auto& [handle, view] : s.dsvs)
+            if (view.resource == resource) remember_depth_handle(handle);
         s.depth_width = static_cast<std::uint32_t>(desc.Width);
         s.depth_height = desc.Height;
-        if (!make_depth_copy(s, desc)) return;
-        D3D12_RESOURCE_BARRIER ours[2]{};
-        ours[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        ours[0].Transition.pResource = resource;
-        ours[0].Transition.Subresource = b.Transition.Subresource;
-        ours[0].Transition.StateBefore = b.Transition.StateBefore;
-        ours[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        ours[1] = ours[0];
-        std::swap(ours[1].Transition.StateBefore, ours[1].Transition.StateAfter);
-        original(list, 1, &ours[0]);
-        D3D12_TEXTURE_COPY_LOCATION to{}, from{};
-        to.pResource = s.depth_copy.Get();
-        to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        to.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32_TYPELESS;
-        to.PlacedFootprint.Footprint.Width = static_cast<UINT>(desc.Width);
-        to.PlacedFootprint.Footprint.Height = desc.Height;
-        to.PlacedFootprint.Footprint.Depth = 1;
-        to.PlacedFootprint.Footprint.RowPitch = s.depth_pitch;
-        from.pResource = resource;
-        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        from.SubresourceIndex = 0;
-        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
-        original(list, 1, &ours[1]);
-        s.depth_copied = true;
-        s.notes[list].depth_copied = true;
+        auto& n = s.notes[list];
+        n.depth_state_known = true;
+        n.depth_state = b.Transition.StateAfter;
     } catch (...) {}
 }
 } // namespace dingosdk::world_cover

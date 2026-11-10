@@ -9,9 +9,10 @@
 // and the game's grading, bloom and anti-aliasing treat it as part of the world.
 //
 // How it finds that moment, from what D3D12 shows of the game's frame (no game addresses):
-// - The world's depth: the main depth buffer as the depth tap finds it (depth_tap.cpp: the first
-//   screen-shaped depth buffer each frame that goes from being written to being read), copied then,
-//   on the game's own command list, into a buffer of ours, as the tap copies it.
+// - The world's depth: the main depth buffer as the depth tap finds it (depth_tap.cpp: a
+//   screen-shaped depth buffer that goes from being written to being read). It is read where it is,
+//   by our list, and only while the game itself has left it readable by pixel shaders: nothing is
+//   recorded on the game's command lists (a copy of the depth put on them hung the GPU, 2026-11-10).
 // - The world's colour: the render target bound together with that depth buffer (OMSetRenderTargets)
 //   whose format is a floating-point one: the lit, not yet tone-mapped picture. The G-buffer's
 //   targets are not floating point and the UI never draws with the world's depth bound, so neither is
@@ -21,7 +22,7 @@
 //   a command list of ours submitted just before that batch, so nothing of the game's own command
 //   lists, their state or their order changes.
 // Anything not as expected (the colour's state unknown, the depth and colour not the same size, no
-// depth copy this frame, render passes instead of OMSetRenderTargets) draws nothing that frame. At
+// depth readable as it is, render passes instead of OMSetRenderTargets) draws nothing that frame. At
 // worst the cover is late and drawn after the game has used the picture: then it is not seen.
 // Also nothing while the colour is half-way through a split barrier, has memory aliased onto it,
 // or is in an unordered-access state. If the game touches the colour from a command list that is
@@ -61,7 +62,7 @@ void present(std::uint32_t width, std::uint32_t height) noexcept;
 void release() noexcept;
 
 // From the depth tap's ResourceBarrier hook (depth_tap.cpp), for each barrier the game records,
-// before the game's own barrier is recorded. `original` records a barrier without the hook.
+// before the game's own barrier is recorded. Only watches: it records nothing.
 using BarrierFn = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*);
 void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& barrier, BarrierFn original) noexcept;
 }
