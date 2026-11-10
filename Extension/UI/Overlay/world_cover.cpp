@@ -73,7 +73,7 @@ struct Notes {
     bool depth_state_known{};
     D3D12_RESOURCE_STATES depth_state{}; // the main depth's state when the list ends
     bool unsafe{};         // a split or aliasing barrier on the colour or depth: no cover this frame
-    ID3D12Resource* first_written{}; // the first full-size float picture written on it
+    ID3D12Resource* last_written{}; // the last full-size float picture written on it
 };
 
 struct Shared {
@@ -117,15 +117,16 @@ struct Shared {
     unsigned presents_wanted{}; // presents while the cover was wanted and allowed (for the log)
     std::set<std::string> bindings_said; // what the game binds with the world's depth, said once each
     std::set<ID3D12Resource*> pictures_said; // full-size float pictures seen written, said once each
-    // The game writes more than one full-size float picture a frame (the lit world, then others made
-    // from it). Drawing into whichever came last made the cover flicker (2026-11-10), so it locks onto
-    // one: the picture written first in most of 30 frames, the lit world before anything is made of it.
+    // The game writes more than one full-size float picture a frame. Drawing into whichever came last
+    // before the cover's moment made it flicker (2026-11-10), so it locks onto one: the picture written
+    // last, after the world's depth is done, in most of 30 frames (the game's final float picture,
+    // before its tone mapping and UI).
     struct Vote {
         unsigned count{};
         DXGI_FORMAT format{};
     };
     std::map<ID3D12Resource*, Vote> votes;
-    ID3D12Resource* frame_first{}; // this frame's first picture written, as its lists are submitted
+    ID3D12Resource* frame_last{}; // this frame's last picture written after the depth, as lists are submitted
     ID3D12Resource* locked{};
     DXGI_FORMAT locked_format{};
     bool locked_seen{};
@@ -329,8 +330,13 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
                 s.depth_state = n.depth_state;
             }
             if (n.unsafe) s.unsafe = true;
-            if (n.first_written && !s.frame_first) s.frame_first = n.first_written;
-            if (n.first_written == s.locked || (n.world && n.colour == s.locked)) s.locked_seen = true;
+            // A picture counts only once the world's depth is done and readable: one written before
+            // that is not the lit world (the game writes one then, and the cover could never read the
+            // depth at its moment, 2026-11-10). The last one written after it is kept for the vote.
+            const bool depth_done = s.depth_state_known && (s.depth_state & D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) &&
+                                    !(s.depth_state & D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            if (n.last_written && depth_done) s.frame_last = n.last_written;
+            if (n.last_written == s.locked || (n.world && n.colour == s.locked)) s.locked_seen = true;
             if (n.world) {
                 s.colour = n.colour;
                 s.pending = !s.drawn;
@@ -690,8 +696,8 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
         s.width = width, s.height = height;
         s.main_missed = s.main_seen ? 0 : s.main_missed + 1;
         // The picture the cover goes into: voted for over 30 frames, then kept while it is still written.
-        if (s.frame_first) {
-            ++s.votes[s.frame_first].count;
+        if (s.frame_last) {
+            ++s.votes[s.frame_last].count;
             ++s.frames_voted;
         }
         if (s.locked) {
@@ -714,13 +720,13 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
                 s.said_colour = true;
                 colour_now.store(s.locked);
                 logging::printf(logging::Level::info, logging::Channel::graphics,
-                                "World cover: the world's picture is the one written first in %u of %u frames (format %u).", best->second.count,
+                                "World cover: the world's picture is the one written last after the depth in %u of %u frames (format %u).", best->second.count,
                                 s.frames_voted, static_cast<unsigned>(best->second.format));
             }
             s.votes.clear();
             s.frames_voted = 0;
         }
-        s.frame_first = nullptr;
+        s.frame_last = nullptr;
         s.locked_seen = false;
         s.pending = s.drawn = s.depth_elsewhere = s.unsafe = s.main_seen = false;
         s.colour_state_known = false;
@@ -804,7 +810,7 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
             if (b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) n.unsafe = true;
             if (written) {
                 n.world = true; // the picture was drawn into on this list
-                if (!n.first_written) n.first_written = resource;
+                n.last_written = resource;
             }
             n.colour_state_known = true;
             n.colour_state = b.Transition.StateAfter;
@@ -826,7 +832,7 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
             std::lock_guard lock(s.mutex);
             if (!s.depth_width || desc.Width != s.depth_width || desc.Height != s.depth_height) return;
             auto& n = s.notes[list];
-            if (!n.first_written) n.first_written = resource;
+            n.last_written = resource;
             if (s.votes.size() < 16 || s.votes.contains(resource)) s.votes[resource].format = format;
             if (s.pictures_said.size() < 8 && s.pictures_said.insert(resource).second)
                 logging::printf(logging::Level::info, logging::Channel::graphics,
