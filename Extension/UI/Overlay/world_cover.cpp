@@ -106,7 +106,8 @@ struct Shared {
     ComPtr<ID3D12GraphicsCommandList> list;
     ComPtr<ID3D12Fence> fence;
     UINT64 fence_value{};
-    bool failed{}, said_drawn{}, said_late{}, said_depth{};
+    bool failed{}, said_drawn{}, said_late{}, said_depth{}, said_colour{}, said_waiting{};
+    unsigned presents_wanted{}; // presents while the cover was wanted and allowed (for the log)
 };
 Shared& shared() { static auto* value = new Shared; return *value; }
 
@@ -218,6 +219,12 @@ void STDMETHODCALLTYPE hooked_targets(ID3D12GraphicsCommandList* list, UINT coun
         n.colour_state_known = true; // bound as a target: in RENDER_TARGET now
         n.colour_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
         s.colour_format = found->second.format;
+        if (!s.said_colour) {
+            s.said_colour = true;
+            logging::printf(logging::Level::info, logging::Channel::graphics, "World cover: the world's picture is %llux%u, format %u, %u mip level(s).",
+                            static_cast<unsigned long long>(desc.Width), desc.Height, static_cast<unsigned>(found->second.format),
+                            static_cast<unsigned>(desc.MipLevels));
+        }
         colour_now.store(n.colour);
     } catch (...) {}
 }
@@ -594,6 +601,15 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
         ++s.frame;
         // Notes left from lists recorded but never submitted would otherwise grow without end.
         if (s.notes.size() > 4096) s.notes.clear();
+        // Wanted for ten seconds or so and never drawn: say what of the frame was found.
+        if (!s.said_drawn && !s.said_waiting && ++s.presents_wanted == 600) {
+            s.said_waiting = true;
+            logging::printf(logging::Level::info, logging::Channel::graphics,
+                            "World cover: not drawn yet; world depth %s, world picture %s, depth views known %u, render target views known %zu.",
+                            s.main_depth ? "found" : "not found", s.said_colour ? "found" : "not found",
+                            static_cast<unsigned>(std::count_if(depth_handles.begin(), depth_handles.end(), [](const auto& h) { return h.load() != 0; })),
+                            s.rtvs.size());
+        }
     } catch (...) {}
 }
 
@@ -684,13 +700,14 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
         if (!(b.Transition.StateBefore & D3D12_RESOURCE_STATE_DEPTH_WRITE)) return;
         constexpr auto read = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         if (!(b.Transition.StateAfter & read) || b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) return;
-        if (b.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) return;
+        // The whole buffer, or its depth plane alone (subresource 0): the game moves the planes apart.
+        if (b.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES && b.Transition.Subresource != 0) return;
         if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) return;
         auto& s = shared();
         std::lock_guard lock(s.mutex);
         if (!s.device || (s.main_depth && s.main_missed < 30)) return;
         const auto desc = resource->GetDesc();
-        if (!depth_shaped(desc, s.width, s.height) || desc.MipLevels != 1) return;
+        if (!depth_shaped(desc, s.width, s.height)) return;
         // A new main depth buffer (a resize, a level): its views are looked for afresh.
         s.main_depth = resource;
         main_depth_now.store(resource);
@@ -702,6 +719,11 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
             if (view.resource == resource) remember_depth_handle(handle);
         s.depth_width = static_cast<std::uint32_t>(desc.Width);
         s.depth_height = desc.Height;
+        logging::printf(logging::Level::info, logging::Channel::graphics,
+                        "World cover: the world's depth is %llux%u, format %u, %u mip level(s), barrier on subresource %s, now in state 0x%x.",
+                        static_cast<unsigned long long>(desc.Width), desc.Height, static_cast<unsigned>(desc.Format), static_cast<unsigned>(desc.MipLevels),
+                        b.Transition.Subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES ? "all" : "0",
+                        static_cast<unsigned>(b.Transition.StateAfter));
         auto& n = s.notes[list];
         n.depth_state_known = true;
         n.depth_state = b.Transition.StateAfter;
