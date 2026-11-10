@@ -426,6 +426,10 @@ public:
     // "control" (key: fog, fog_distance, sky_brightness, clouds, wind_strength, wind_direction,
     // traffic, pedestrians; value a number, -1 the default) or "park" (key: a lot, value a layout).
     virtual std::string set_environment(std::string_view, std::string_view, std::string_view) { return unavailable; }
+    // The world controls as the player's profile holds them now (the "control" keys above, -1 each one
+    // left to the level), so a plugin that changes one can put the player's own value back; empty
+    // without a profile.
+    virtual std::vector<std::pair<std::string, double>> world_controls() { return {}; }
     virtual std::vector<Destination> destinations() { return {}; }
     virtual std::vector<LevelInfo> levels() { return {}; }
     // kind "location" (a destination's id) or "level" (a level's asset); a guest is refused.

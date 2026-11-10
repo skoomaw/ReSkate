@@ -772,6 +772,24 @@ struct WorldApi {
         return environment(L, "control", key, std::to_string(value));
     }
     static int set_park(lua_State* L) { return environment(L, "park", checked_text(L, 1, 30, "a lot"), checked_text(L, 2, 40, "a layout")); }
+    // controls(): {fog = n, fog_distance = n, sky_brightness = n, clouds = n, wind_strength = n,
+    // wind_direction = n, traffic = n, pedestrians = n} as the player's profile holds them (-1: the
+    // level's own), or nil without a profile; what set_control changes, so it can be put back.
+    static int controls(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "world.environment", "reskate.world.controls");
+        const auto now = game_of(plugin).world_controls();
+        if (now.empty()) {
+            lua_pushnil(L);
+            return 1;
+        }
+        lua_createtable(L, 0, static_cast<int>(now.size()));
+        for (const auto& [key, value] : now) {
+            lua_pushnumber(L, value);
+            lua_setfield(L, -2, key.c_str());
+        }
+        return 1;
+    }
     // ---- travel ------------------------------------------------------------------------------------
     static int locations(lua_State* L) {
         auto& plugin = plugin_of(L);
@@ -3457,7 +3475,7 @@ void WorldApi::install(Plugin& plugin, lua_State* L) {
     add_functions(L, "entities", {{"set", entities_set}, {"remove", entities_remove}, {"clear", entities_clear}, {"status", entities_status},
                                   {"ready", entities_ready}, {"blueprints", entities_blueprints},
                                   {"bounds", entities_bounds}});
-    add_functions(L, "world", {{"set_time", set_time}, {"set_control", set_control}, {"set_park", set_park}, {"pick", world_pick}, {"probe", world_probe}});
+    add_functions(L, "world", {{"set_time", set_time}, {"set_control", set_control}, {"set_park", set_park}, {"controls", controls}, {"pick", world_pick}, {"probe", world_probe}});
     add_functions(L, "travel", {{"locations", locations}, {"levels", levels}, {"go", go}, {"load", load}});
     add_functions(L, "ai", {{"spawn", ai_spawn}, {"clear", ai_clear}, {"count", ai_count}});
     add_functions(L, "session", {{"skaters", skaters}, {"tag", tag}, {"nametags", nametags}, {"joint", session_joint}, {"touch", session_touch},

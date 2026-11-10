@@ -368,6 +368,11 @@ public:
         }
         return out;
     }
+    std::vector<std::pair<std::string, double>> world_controls() override {
+        const auto c = local_profile_world_controls().choices;
+        return {{"fog", c.fog}, {"fog_distance", c.fog_distance}, {"sky_brightness", c.sky_brightness}, {"clouds", c.clouds},
+                {"wind_strength", c.wind_strength}, {"wind_direction", c.wind_direction}, {"traffic", c.traffic}, {"pedestrians", c.pedestrians}};
+    }
     std::string set_environment(std::string_view kind, std::string_view key, std::string_view value) override {
         if (kind == "tod") return time_of_day(key);
         if (kind == "control") {

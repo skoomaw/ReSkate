@@ -898,6 +898,7 @@ struct FakeGame final : Game {
         calls.push_back(std::format("env {} {} {}", kind, key, value));
         return key == "never" ? "refused" : "";
     }
+    std::vector<std::pair<std::string, double>> world_controls() override { return {{"fog", 0}, {"fog_distance", 1.5}, {"clouds", -1}}; }
     std::vector<Destination> destinations() override { return {{"bam", "BAM", "bam"}}; }
     std::vector<LevelInfo> levels() override { return {{"Levels/Game/X/X", "X", true}}; }
     std::string travel(std::string_view kind, std::string_view target) override { calls.push_back(std::format("travel {} {}", kind, target)); return {}; }
@@ -4710,10 +4711,11 @@ void plugins_cover_the_world() {
     // Without the permission it is refused.
     host.apply({snow, package("sneaky", {{manifest_file, manifest()}, {"plugin/main.lua", R"(
         reskate.log(tostring(pcall(reskate.effects.cover, {})) .. " " .. tostring(pcall(reskate.effects.cover, nil)) .. " " ..
-            tostring(pcall(reskate.effects.keep_clear, {})))
+            tostring(pcall(reskate.effects.keep_clear, {})) .. " " .. tostring(pcall(reskate.world.controls)))
     )"}})});
     ticks(host, environment, 1);
-    check(environment.logged("[sneaky] false false false"), "effects is needed for a cover and its clear places\n" + environment.all());
+    check(environment.logged("[sneaky] false false false false"),
+          "effects is needed for a cover and its clear places, world.environment to read the world controls\n" + environment.all());
     check(game.coverer == "snow", "A refused plugin does not take the cover");
     // Unloading the plugin ends its cover.
     host.apply({});
@@ -6397,6 +6399,8 @@ void the_wider_set_reaches_the_game() {
             assert(reskate.objects.remove("42"))
             assert(not pcall(reskate.objects.remove, "not a number"))
             assert(reskate.world.set_time("night") and reskate.world.set_control("fog", 1) and reskate.world.set_park("historic", "skatepark_02"))
+            local controls = reskate.world.controls()
+            assert(controls and controls.fog == 0 and controls.fog_distance == 1.5 and controls.clouds == -1, "the world controls as they are")
             local ok, why = reskate.world.set_time("never")
             assert(not ok and why == "refused")
             assert(#reskate.travel.locations() == 1 and #reskate.travel.levels() == 1)
