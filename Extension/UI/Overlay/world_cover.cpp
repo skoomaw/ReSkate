@@ -403,6 +403,16 @@ bool build_resources(Shared& s, const D3D12_RESOURCE_DESC& colour) {
     return true;
 }
 
+// Whether this device lets a view read a typed resource in another format of its family.
+bool casting_typed(ID3D12Device* device) {
+    static const bool supported = [device] {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS3 options{};
+        return SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &options, sizeof(options))) &&
+               options.CastingFullyTypedFormatSupported;
+    }();
+    return supported;
+}
+
 // Records our list: the picture copied, then drawn back with the cover over it. Under the lock.
 bool record_cover(Shared& s) {
     if (s.failed || !s.colour || !s.main_depth) return false;
@@ -412,6 +422,12 @@ bool record_cover(Shared& s) {
     DXGI_FORMAT depth_read = DXGI_FORMAT_UNKNOWN;
     if (depth_desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS) depth_read = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
     else if (depth_desc.Format == DXGI_FORMAT_R32_TYPELESS) depth_read = DXGI_FORMAT_R32_FLOAT;
+    else if (casting_typed(s.device)) {
+        // A depth made in a typed depth format (the game's is D32_FLOAT_S8X24_UINT, and it reads it in
+        // shaders itself), read through the same family's float format.
+        if (depth_desc.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT) depth_read = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+        else if (depth_desc.Format == DXGI_FORMAT_D32_FLOAT) depth_read = DXGI_FORMAT_R32_FLOAT;
+    }
     if (depth_read == DXGI_FORMAT_UNKNOWN || !s.depth_state_known || !(s.depth_state & D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) ||
         (s.depth_state & (D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_UNORDERED_ACCESS))) {
         if (!s.said_depth) {
@@ -705,9 +721,13 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
         if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) return;
         auto& s = shared();
         std::lock_guard lock(s.mutex);
-        if (!s.device || (s.main_depth && s.main_missed < 30)) return;
+        if (!s.device) return;
         const auto desc = resource->GetDesc();
         if (!depth_shaped(desc, s.width, s.height)) return;
+        // The largest such buffer is the world's: the game keeps smaller, screen-shaped ones too (a
+        // 960x540 one at 1080p, 2026-11-10). A smaller one takes over only once the one known has
+        // not been seen for 30 presents (the screen got smaller).
+        if (s.main_depth && desc.Width * desc.Height <= UINT64{s.depth_width} * s.depth_height && s.main_missed < 30) return;
         // A new main depth buffer (a resize, a level): its views are looked for afresh.
         s.main_depth = resource;
         main_depth_now.store(resource);
