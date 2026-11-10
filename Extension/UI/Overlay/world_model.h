@@ -47,7 +47,7 @@ struct Info {
     Status status{Status::none};
     std::string why;
     std::vector<std::string> materials;
-    std::optional<float> near; // the game's near distance as measured, once it is
+    std::optional<float> near_distance; // the game's near distance as measured, once it is
 };
 Info info();
 // Drawn for the next 300 ms (set it every tick) with this look, once it is loaded.

@@ -1189,7 +1189,7 @@ public:
         std::string status; // "loading", "ready" or "failed"
         std::string why;
         std::vector<std::string> materials;
-        std::optional<float> near; // the game's near distance, once measured
+        std::optional<float> near_distance; // the game's near distance, once measured
     };
     virtual std::optional<WorldModelInfo> world_model_info(std::string_view /*plugin*/) { return std::nullopt; }
     struct WorldModelMaterial {

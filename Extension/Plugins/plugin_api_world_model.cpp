@@ -70,8 +70,8 @@ struct WorldModelApi {
         if (!found->why.empty()) field_text(L, "why", found->why);
         push_texts(L, found->materials);
         lua_setfield(L, -2, "materials");
-        if (found->near) {
-            lua_pushnumber(L, *found->near);
+        if (found->near_distance) {
+            lua_pushnumber(L, *found->near_distance);
             lua_setfield(L, -2, "near");
         }
         return 1;

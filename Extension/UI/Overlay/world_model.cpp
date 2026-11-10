@@ -33,7 +33,7 @@ struct Shared {
     std::shared_ptr<const viewmodel::Model> loaded;
     Look look;
     double until{};
-    std::optional<float> near;
+    std::optional<float> near_distance;
 };
 Shared& shared() {
     static auto* value = new Shared;
@@ -368,7 +368,7 @@ void read_counts(const Frame& f) {
     }
     auto& s = shared();
     std::lock_guard lock(s.mutex);
-    s.near = now;
+    s.near_distance = now;
 }
 } // namespace
 
@@ -399,7 +399,7 @@ Info info() {
     Info out;
     out.status = s.status;
     out.why = s.why;
-    out.near = s.near;
+    out.near_distance = s.near_distance;
     if (s.loaded)
         for (const auto& material : s.loaded->materials) out.materials.push_back(material.name);
     return out;

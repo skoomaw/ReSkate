@@ -1359,7 +1359,7 @@ public:
         out.status = now.status == world_model::Status::ready ? "ready" : now.status == world_model::Status::failed ? "failed" : "loading";
         out.why = std::move(now.why);
         out.materials = std::move(now.materials);
-        out.near = now.near;
+        out.near_distance = now.near_distance;
         return out;
     }
     std::string world_model_show(std::string_view plugin, std::optional<WorldModelLook> look) override {

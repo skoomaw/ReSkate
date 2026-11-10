@@ -14,12 +14,12 @@ void expect(bool condition, const char* what) {
     ++failures;
     std::printf("FAIL: %s\n", what);
 }
-bool near(float a, float b, float within) { return std::fabs(a - b) <= within; }
+bool close_to(float a, float b, float within) { return std::fabs(a - b) <= within; }
 
 // As world_model.hlsl counts a product.
 void count(NearSample& sample, float product, std::uint32_t times = 1) {
     const float at = std::log(product / near_lowest) / std::log(near_ratio());
-    if (!(at >= 0) || at >= near_bins) return;
+    if (!(at >= 0) || at >= static_cast<float>(near_bins)) return;
     const auto bin = static_cast<std::size_t>(at);
     sample.counts[bin] += times;
     sample.sums[bin] += static_cast<std::uint32_t>((product / near_bin_low(bin) - 1.0f) * sum_scale) * times;
@@ -35,7 +35,7 @@ void the_near_distance_is_found_under_hidden_and_edge_pixels() {
     // A few edge pixels that slipped through: far smaller.
     count(sample, 0.004f, 5);
     const auto found = near_of(sample);
-    expect(found && near(*found, 0.0997f, 0.0005f), "the cluster under the hidden pixels, not the stray edges");
+    expect(found && close_to(*found, 0.0997f, 0.0005f), "the cluster under the hidden pixels, not the stray edges");
 }
 
 void too_few_pixels_say_nothing() {
@@ -51,10 +51,10 @@ void the_estimate_holds_the_middle_of_recent_frames() {
     estimate.add(0.1f);
     expect(!estimate.value(), "not before three frames");
     estimate.add(0.5f); // a frame with the model all hidden
-    expect(estimate.value() && near(*estimate.value(), 0.1f, 1e-6f), "one odd frame does not move it");
+    expect(estimate.value() && close_to(*estimate.value(), 0.1f, 1e-6f), "one odd frame does not move it");
     estimate.add(0.0f);
     estimate.add(100.0f);
-    expect(estimate.value() && near(*estimate.value(), 0.1f, 1e-6f), "values out of range are not kept");
+    expect(estimate.value() && close_to(*estimate.value(), 0.1f, 1e-6f), "values out of range are not kept");
     estimate.reset();
     expect(!estimate.value(), "reset forgets");
 }
@@ -64,10 +64,10 @@ void a_model_is_turned_scaled_and_moved() {
     const float s = std::sqrt(0.5f);
     const auto m = placement({1, 2, 3}, {0, s, 0, s}, 2.0f);
     const auto p = apply(m, {1, 0, 0});
-    expect(near(p[0], 1, 1e-5f) && near(p[1], 2, 1e-5f) && near(p[2], 1, 1e-5f), "turned, doubled and moved");
+    expect(close_to(p[0], 1, 1e-5f) && close_to(p[1], 2, 1e-5f) && close_to(p[2], 1, 1e-5f), "turned, doubled and moved");
     const auto still = placement({0, 0, 0}, {0, 0, 0, 0}, 1.0f);
     const auto q = apply(still, {0.5f, 0.25f, -1});
-    expect(near(q[0], 0.5f, 1e-6f) && near(q[1], 0.25f, 1e-6f) && near(q[2], -1, 1e-6f), "no rotation is the identity");
+    expect(close_to(q[0], 0.5f, 1e-6f) && close_to(q[1], 0.25f, 1e-6f) && close_to(q[2], -1, 1e-6f), "no rotation is the identity");
 }
 } // namespace
 
