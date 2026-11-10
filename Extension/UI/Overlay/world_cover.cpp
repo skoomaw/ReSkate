@@ -73,7 +73,7 @@ struct Notes {
     bool depth_state_known{};
     D3D12_RESOURCE_STATES depth_state{}; // the main depth's state when the list ends
     bool unsafe{};         // a split or aliasing barrier on the colour or depth: no cover this frame
-    ID3D12Resource* last_written{}; // the last full-size float picture written on it
+    std::uint64_t last_written{}; // the kind (format, flags, compute or drawn) of the last full-size float picture written on it
 };
 
 struct Shared {
@@ -126,10 +126,11 @@ struct Shared {
         unsigned count{};
         DXGI_FORMAT format{};
     };
-    std::map<ID3D12Resource*, Vote> votes;
-    ID3D12Resource* frame_last{}; // this frame's last picture written after the depth, as lists are submitted
-    ID3D12Resource* locked{};
-    DXGI_FORMAT locked_format{};
+    // By kind, not by picture: the game keeps two of each and takes turns with them a frame each (its
+    // anti-aliasing reads last frame's), so one picture locked onto had the cover every other frame.
+    std::map<std::uint64_t, Vote> votes;
+    std::uint64_t frame_last{}; // the kind of this frame's last picture written after the depth
+    std::uint64_t locked{};     // the kind the cover goes into, 0 before one is chosen
     bool locked_seen{};
     unsigned frames_voted{}, locked_missed{};
     // Why frames went without the cover, counted and said in the log now and then.
@@ -262,7 +263,7 @@ void note_targets(ID3D12GraphicsCommandList* list, UINT count, SIZE_T first_colo
         if (s.bindings_said.insert(kind).second)
             logging::write(logging::Level::info, logging::Channel::graphics, "World cover: with the world's depth, " + kind + ".");
     }
-    if (!fits || (s.locked && view->resource != s.locked)) return;
+    if (!fits || s.locked) return;
     auto& n = s.notes[list];
     n.world = true;
     n.colour = view->resource;
@@ -345,7 +346,7 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
             const bool depth_done = s.depth_state_known && (s.depth_state & D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) &&
                                     !(s.depth_state & D3D12_RESOURCE_STATE_DEPTH_WRITE);
             if (n.last_written && depth_done) s.frame_last = n.last_written;
-            if (n.last_written == s.locked || (n.world && n.colour == s.locked)) s.locked_seen = true;
+            if (s.locked && n.last_written == s.locked) s.locked_seen = true;
             if (n.world) {
                 s.colour = n.colour;
                 s.pending = !s.drawn;
@@ -741,7 +742,7 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
             s.locked_missed = s.locked_seen ? 0 : s.locked_missed + 1;
             if (s.locked_missed > 120) {
                 logging::write(logging::Level::info, logging::Channel::graphics, "World cover: the world's picture is no longer written; choosing again.");
-                s.locked = nullptr;
+                s.locked = 0;
                 colour_now.store(nullptr);
                 s.votes.clear();
                 s.frames_voted = 0;
@@ -751,11 +752,9 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
                                                [](const auto& a, const auto& b) { return a.second.count < b.second.count; });
             if (best != s.votes.end() && best->second.count >= 20 && best->second.format != DXGI_FORMAT_UNKNOWN) {
                 s.locked = best->first;
-                s.locked_format = best->second.format;
                 s.colour_format = best->second.format;
                 s.locked_missed = 0;
                 s.said_colour = true;
-                colour_now.store(s.locked);
                 logging::printf(logging::Level::info, logging::Channel::graphics,
                                 "World cover: the world's picture is the one written last after the depth in %u of %u frames (format %u).", best->second.count,
                                 s.frames_voted, static_cast<unsigned>(best->second.format));
@@ -763,7 +762,7 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
             s.votes.clear();
             s.frames_voted = 0;
         }
-        s.frame_last = nullptr;
+        s.frame_last = 0;
         s.locked_seen = false;
         s.pending = s.drawn = s.depth_elsewhere = s.unsafe = s.main_seen = false;
         s.colour_state_known = false;
@@ -847,7 +846,7 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
             if (b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) n.unsafe = true;
             if (written) {
                 n.world = true; // the picture was drawn into on this list
-                n.last_written = resource;
+                n.last_written = s.locked;
             }
             n.colour_state_known = true;
             n.colour_state = b.Transition.StateAfter;
@@ -868,9 +867,20 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
             auto& s = shared();
             std::lock_guard lock(s.mutex);
             if (!s.depth_width || desc.Width != s.depth_width || desc.Height != s.depth_height) return;
+            // Its kind: format, flags, and whether it was written by compute or drawn into.
+            const std::uint64_t kind = std::uint64_t{static_cast<std::uint32_t>(format)} | (std::uint64_t{static_cast<std::uint32_t>(desc.Flags)} << 8) |
+                                       ((b.Transition.StateBefore & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) ? (std::uint64_t{1} << 40) : 0);
             auto& n = s.notes[list];
-            n.last_written = resource;
-            if (s.votes.size() < 16 || s.votes.contains(resource)) s.votes[resource].format = format;
+            n.last_written = kind;
+            if (s.votes.size() < 16 || s.votes.contains(kind)) s.votes[kind].format = format;
+            // One of the kind the cover goes into, just written: this frame's picture.
+            if (s.locked && kind == s.locked) {
+                n.world = true;
+                n.colour = resource;
+                n.colour_state_known = true;
+                n.colour_state = b.Transition.StateAfter;
+                colour_now.store(resource);
+            }
             if (s.pictures_said.size() < 8 && s.pictures_said.insert(resource).second)
                 logging::printf(logging::Level::info, logging::Channel::graphics,
                                 "World cover: a full-size float picture written (%llux%u, format %u, flags 0x%x, state 0x%x to 0x%x).",
