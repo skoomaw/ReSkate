@@ -75,6 +75,13 @@ struct Notes {
     bool unsafe{};         // a split or aliasing barrier on the colour or depth: no cover this frame
     std::uint64_t last_written{}; // the kind (format, flags, compute or drawn) of the last full-size float picture written on it
     std::vector<std::string> events; // while tracing: what happened on it to the depth and the big float pictures
+    // The frame's last list: the screen goes from PRESENT to a render target on it, and the float
+    // picture of the finished scene it puts there (with the UI, from a layer of its own) is moved from
+    // being written to being read: that picture, its format, and its state before this list.
+    bool composite{};
+    ID3D12Resource* final_picture{};
+    D3D12_RESOURCE_STATES final_before{};
+    DXGI_FORMAT final_format{};
 };
 
 struct Shared {
@@ -359,12 +366,24 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
             const auto found = s.notes.find(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
             if (found != s.notes.end() && found->second.world) world_here = true;
         }
-        // The world is finished: the cover goes in just before this batch, in a list of ours.
-        if (s.pending && !s.drawn && !world_here) {
-            s.pending = false;
+        (void)world_here;
+        // The frame's last batch, which puts the finished scene on the screen with the UI (a layer of its
+        // own): the cover goes into the scene's picture just before it, in a list of ours. The game draws
+        // almost a whole frame in one command list, so this is the first place after the scene is done
+        // (traced 2026-11-10: the screen PRESENT to render target, the 1920x1080 R11G11B10 scene and the
+        // RGBA8 UI layer read, the screen back to PRESENT, all in one batch of one list).
+        const Notes* composite{};
+        for (UINT i = 0; i < count && !composite; ++i) {
+            const auto found = s.notes.find(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
+            if (found != s.notes.end() && found->second.composite && found->second.final_picture) composite = &found->second;
+        }
+        if (composite && !s.drawn) {
             s.tried = true;
-            s.why = !s.colour_state_known ? "the picture's state not known" : s.unsafe ? "a split or aliasing barrier, or another queue"
-                  : s.depth_elsewhere ? "the depth moved on another queue" : nullptr;
+            s.colour = composite->final_picture;
+            s.colour_state = composite->final_before;
+            s.colour_state_known = true;
+            s.colour_format = composite->final_format;
+            s.why = s.unsafe ? "a split or aliasing barrier, or another queue" : s.depth_elsewhere ? "the depth moved on another queue" : nullptr;
             const bool drew = !s.why && record_cover(s);
             if (tracing.load()) {
                 if (s.quiet_batches) s.trace_lines.push_back(std::format("  ({} batch(es) with nothing traced)", s.quiet_batches));
@@ -380,7 +399,9 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
                 s.allocator_fence[(s.next_allocator + s.allocators.size() - 1) % s.allocators.size()] = s.fence_value;
                 if (!s.said_drawn) {
                     s.said_drawn = true;
-                    logging::write(logging::Level::info, logging::Channel::graphics, "World cover: drawn into the world's picture before post-processing.");
+                    logging::printf(logging::Level::info, logging::Channel::graphics,
+                                    "World cover: drawn into the finished scene (format %u) just before the game puts it on the screen with its UI.",
+                                    static_cast<unsigned>(s.colour_format));
                 }
             }
         }
@@ -771,9 +792,8 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
         s.width = width, s.height = height;
         s.main_missed = s.main_seen ? 0 : s.main_missed + 1;
         // How this frame went, counted; every 600 frames (the first eight times) said in the log.
-        if (s.locked) {
-            ++s.outcomes[s.drawn ? "drawn" : !s.tried ? (s.pending ? "too late: the picture's last write was in the frame's last batch" : "the picture not written")
-                                                      : (s.why ? s.why : "not drawn")];
+        if (s.main_depth) {
+            ++s.outcomes[s.drawn ? "drawn" : !s.tried ? "the frame's last batch (to the screen) not seen" : (s.why ? s.why : "not drawn")];
             if (++s.outcome_frames >= 600) {
                 if (s.outcome_reports < 8) {
                     ++s.outcome_reports;
@@ -786,7 +806,7 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
             }
         }
         // The trace: started 120 frames after the picture is chosen, said frame by frame, six frames.
-        if (s.locked && !s.traced && !tracing.load() && ++s.frames_since_lock == 120) {
+        if (s.main_depth && !s.traced && !tracing.load() && ++s.frames_since_lock == 120) {
             s.trace_frames_left = 6;
             s.trace_lines.clear();
             s.trace_ids.clear();
@@ -925,6 +945,30 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
         }
         if (b.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !b.Transition.pResource) return;
         auto* const resource = b.Transition.pResource;
+        // The frame's last list (Notes::composite): the screen made a render target, and the finished
+        // scene's float picture moved from being written to being read on the same list.
+        if (list->GetType() == D3D12_COMMAND_LIST_TYPE_DIRECT && b.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE) {
+            const bool to_screen = b.Transition.StateBefore == D3D12_RESOURCE_STATE_PRESENT && (b.Transition.StateAfter & D3D12_RESOURCE_STATE_RENDER_TARGET);
+            const bool finished = (b.Transition.StateBefore & (D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS)) &&
+                                  (b.Transition.StateAfter & D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) &&
+                                  !(b.Transition.StateAfter & (D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+            if (to_screen || finished) {
+                const auto d = resource->GetDesc();
+                auto& s = shared();
+                std::lock_guard lock(s.mutex);
+                if (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.SampleDesc.Count == 1) {
+                    auto& n = s.notes[list];
+                    if (to_screen && d.Width == s.width && d.Height == s.height) n.composite = true;
+                    const DXGI_FORMAT f = hdr_view_format(d.Format);
+                    if (finished && !n.final_picture && f != DXGI_FORMAT_UNKNOWN && d.Width == s.depth_width && d.Height == s.depth_height &&
+                        d.MipLevels == 1 && d.DepthOrArraySize == 1) {
+                        n.final_picture = resource;
+                        n.final_before = b.Transition.StateBefore;
+                        n.final_format = f;
+                    }
+                }
+            }
+        }
         constexpr auto writes = D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         constexpr auto reads = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
                                D3D12_RESOURCE_STATE_COPY_SOURCE;
