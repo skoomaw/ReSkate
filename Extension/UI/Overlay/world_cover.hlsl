@@ -91,6 +91,10 @@ Output ps_main(Vertex input) {
     const float near_measured = measured_near();
     const float near_distance = near_measured > 0 ? near_measured : eye_near.w;
     const float3 here = world_at(p, d, near_distance);
+    // The patchiness, from where the point is at a scale that never changes: with the measured one it
+    // jumped whenever the measurement came and went (the skater's feet in and out of view), and the
+    // snow flashed on and off with it (2026-11-10).
+    const float3 steady = world_at(p, d, eye_near.w);
     const float view_distance = dot(here - eye_near.xyz, -back_height.xyz);
     // The surface's direction from its neighbours: on each axis the one nearer in depth, so an edge
     // against something further away does not bend it.
@@ -111,7 +115,7 @@ Output ps_main(Vertex input) {
         // Facing the camera: the side the pixel is seen from.
         if (dot(normal, eye_near.xyz - here) < 0) normal = -normal;
         // Patchy where it thins: large, slow noise over the ground, in the world, so it stays put.
-        const float patch = noise(here.xz * 0.45) * 0.65 + noise(here.xz * 1.9) * 0.35;
+        const float patch = noise(steady.xz * 0.45) * 0.65 + noise(steady.xz * 1.9) * 0.35;
         const float facing = shape.x + (patch - 0.5) * shape.w * 0.6;
         const float softness = max(shape.y, 0.01);
         cover = smoothstep(facing - softness, facing + softness, normal.y) * colour_amount.w;
@@ -147,7 +151,9 @@ Output ps_main(Vertex input) {
             const float3 from = here - clears[c].xyz;
             const float radius = clears[c].w;
             const float height = c == 0 ? clear_info.y : c == 1 ? clear_info.z : clear_info.w;
-            const float inside = (1 - smoothstep(radius * 0.75, radius, length(from.xz))) * step(-0.3, from.y) * step(from.y, height);
+            // From a little over the ground the place stands on, not the ground itself: snow on the
+            // ground around the skater was cleared in a circle, a dark ring when they landed.
+            const float inside = (1 - smoothstep(radius * 0.75, radius, length(from.xz))) * step(0.06, from.y) * step(from.y, height);
             cover *= 1 - inside;
         }
     }
@@ -175,7 +181,7 @@ Output ps_main(Vertex input) {
     light = lerp(light, base, 0.1);
     float3 lit = colour_amount.rgb * light * shape.z;
     if (extra.x > 0) {
-        const float glint = hash(floor(here.xz * 38.0) + floor(here.y * 38.0));
+        const float glint = hash(floor(steady.xz * 38.0) + floor(steady.y * 38.0));
         lit += light * extra.x * 6.0 * step(0.996, glint);
     }
     out_.colour = float4(lerp(under.rgb, lit, cover), under.a);

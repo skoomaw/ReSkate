@@ -32,7 +32,10 @@ constexpr std::size_t list_set_targets = 46, list_begin_render_pass = 68, queue_
 constexpr UINT constant_count = 60;
 constexpr std::size_t most_clear = 3;
 // How much of this frame's cover goes into what is shown, the rest last frame's (world_cover.hlsl).
-constexpr float this_frame_share = 0.25f;
+// All of it: last frame's cover is found with the camera as the client last read it, which can be a
+// frame apart from the one the GPU drew with, and everything that moved left an outline of itself in
+// the snow (2026-11-10). The history is still written, for when the GPU's own camera is known.
+constexpr float this_frame_share = 1.0f;
 constexpr DXGI_FORMAT history_format = DXGI_FORMAT_R16G16_FLOAT;
 
 using CreateViewFn = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, const void*, D3D12_CPU_DESCRIPTOR_HANDLE);
