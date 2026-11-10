@@ -22,6 +22,12 @@ jobs:
             SpotifyHelper/target
           key: cargo-${{ hashFiles('SpotifyHelper/Cargo.lock') }}
 
+      # CMake links an import library cargo downloads with the crates (cmake/Runtime.cmake), so they
+      # are fetched before configuring.
+      - name: Fetch crates
+        working-directory: SpotifyHelper
+        run: cargo fetch --locked
+
       - name: Configure
         run: cmake --preset vs2022-x64
 
