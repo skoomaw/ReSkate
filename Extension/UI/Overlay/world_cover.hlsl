@@ -10,6 +10,9 @@ cbuffer constants : register(b0) {
     float4 colour_amount; // the cover's colour, and how much of a covered surface it hides
     float4 shape;         // facing, softness, brightness, breakup
     float4 extra;         // sparkle, unused, unused, unused
+    float4 clear_info;    // how many places are kept clear (0 to 4)
+    float4 clears[4];     // each: its foot in the world, and its radius
+    float4 clear_heights; // each one's height above its foot
 };
 Texture2D<float4> scene : register(t0);
 Texture2D<float> depth : register(t1);
@@ -29,11 +32,27 @@ float depth_at(int2 p) {
 }
 
 // The point the pixel shows, in the world. Reversed, infinite depth: distance = near / depth.
-float3 world_at(int2 p, float d) {
+float3 world_at(int2 p, float d, float near_distance) {
     const float a = (p.x + 0.5 - up_width.w * 0.5) / right_focal.w;
     const float b = (back_height.w * 0.5 - (p.y + 0.5)) / right_focal.w;
     const float3 ray = right_focal.xyz * a + up_width.xyz * b - back_height.xyz;
-    return eye_near.xyz + ray * (eye_near.w / max(d, 1e-7));
+    return eye_near.xyz + ray * (near_distance / max(d, 1e-7));
+}
+
+// The near distance the game's depth is over, measured where the first place kept clear stands: its
+// distance along the view, times the depth drawn where its foot shows on screen (depth = near /
+// distance). 0 when it cannot be measured (no place kept clear, or its foot is off screen or behind).
+// The camera's own near plane is not known, and without it distances are only right in proportion.
+float measured_near() {
+    if (clear_info.x < 1) return 0;
+    const float3 to = clears[0].xyz - eye_near.xyz;
+    const float distance = dot(to, -back_height.xyz);
+    if (distance < 0.3) return 0;
+    const float2 at = float2(up_width.w * 0.5 + dot(to, right_focal.xyz) * right_focal.w / distance,
+                             back_height.w * 0.5 - dot(to, up_width.xyz) * right_focal.w / distance);
+    if (any(at < 0) || at.x >= up_width.w || at.y >= back_height.w) return 0;
+    const float there = depth_at(int2(at));
+    return there > 0 ? distance * there : 0;
 }
 
 float hash(float2 p) {
@@ -55,7 +74,9 @@ float4 ps_main(Vertex input) : SV_Target {
     const float d = depth_at(p);
     // The sky, and anything at the near plane (the camera inside something).
     if (!(d > 0.0 && d < 1.0)) discard;
-    const float3 here = world_at(p, d);
+    const float near_measured = measured_near();
+    const float near_distance = near_measured > 0 ? near_measured : eye_near.w;
+    const float3 here = world_at(p, d, near_distance);
     // The surface's direction from its neighbours: on each axis the one nearer in depth, so an edge
     // against something further away does not bend it.
     const float dl = depth_at(p - int2(1, 0)), dr = depth_at(p + int2(1, 0));
@@ -63,8 +84,8 @@ float4 ps_main(Vertex input) : SV_Target {
     const bool use_right = abs(dr - d) < abs(dl - d), use_down = abs(dd - d) < abs(du - d);
     const int2 px = use_right ? p + int2(1, 0) : p - int2(1, 0);
     const int2 py = use_down ? p + int2(0, 1) : p - int2(0, 1);
-    float3 across = world_at(px, use_right ? dr : dl) - here;
-    float3 along = world_at(py, use_down ? dd : du) - here;
+    float3 across = world_at(px, use_right ? dr : dl, near_distance) - here;
+    float3 along = world_at(py, use_down ? dd : du, near_distance) - here;
     if (!use_right) across = -across;
     if (!use_down) along = -along;
     float3 normal = cross(along, across);
@@ -78,7 +99,24 @@ float4 ps_main(Vertex input) : SV_Target {
     const float patch = noise(here.xz * 0.45) * 0.65 + noise(here.xz * 1.9) * 0.35;
     const float facing = shape.x + (patch - 0.5) * shape.w * 0.6;
     const float softness = max(shape.y, 0.01);
-    const float cover = smoothstep(facing - softness, facing + softness, normal.y) * colour_amount.w;
+    float cover = smoothstep(facing - softness, facing + softness, normal.y) * colour_amount.w;
+    // Only on surfaces flat across their neighbours. A plane's reversed depth changes evenly across the
+    // screen, so its second difference is nothing; leaves, wires and distant edges are not flat, their
+    // direction comes out differently each frame, and the cover drawn after the game's anti-aliasing
+    // flickered on them (2026-11-10).
+    const float bend = max(abs(dl + dr - 2 * d), abs(du + dd - 2 * d)) / d;
+    cover *= 1 - smoothstep(0.0015, 0.006, bend);
+    // The places kept clear (the skater): upright cylinders over their feet, softened at the edge. Only
+    // when distances are measured, or the cylinder would be in the wrong place.
+    if (near_measured > 0) {
+        [unroll] for (int c = 0; c < 4; ++c) {
+            if (c >= (int)clear_info.x) break;
+            const float3 from = here - clears[c].xyz;
+            const float radius = clears[c].w;
+            const float inside = (1 - smoothstep(radius * 0.8, radius, length(from.xz))) * step(-0.3, from.y) * step(from.y, clear_heights[c]);
+            cover *= 1 - inside;
+        }
+    }
     if (cover <= 0.002) discard;
 
     // Lit as what it covers is lit, without its colour: so a shadow on the ground is a shadow on the

@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 #include <d3d12.h>
+#include <vector>
 
 // A cover over the world's upward-facing surfaces (reskate.effects.cover): snow, sand, dust, moss,
 // whatever a plugin makes of its colour. It is drawn into the game's own lit picture of the world,
@@ -42,9 +43,21 @@ struct Settings {
     float sparkle{0.0f};    // 0..1: glints, as fresh snow has
 };
 
+// A place kept clear of the cover: an upright cylinder `radius` wide standing on `foot` (the world),
+// `height` tall. For the skater: no snow on the player.
+struct Clear {
+    std::array<float, 3> foot{};
+    float radius{0.6f};
+    float height{2.0f};
+};
+
 // Client thread. On until clear().
 void set(const Settings& settings) noexcept;
 void clear() noexcept;
+// Client thread: up to four places kept clear for the next 300 ms (set them every tick); none ends it.
+// The first one also measures the depth's scale where its foot shows on screen, which the cylinders
+// need; while that foot is off screen the cover keeps nothing clear.
+void keep_clear(std::vector<Clear> places) noexcept;
 bool on() noexcept;
 // Client thread, every tick: whether the world is being played now (a level in play, no game menu
 // open). The cover is drawn only once that has held for two seconds, never on the front page, in

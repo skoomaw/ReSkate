@@ -26,7 +26,9 @@ using Microsoft::WRL::ComPtr;
 // Slots of the D3D12 interfaces' tables (d3d12.h's declaration order).
 constexpr std::size_t device_create_rtv = 20, device_create_dsv = 21, device_copy_descriptors = 23, device_copy_simple = 24;
 constexpr std::size_t list_set_targets = 46, list_begin_render_pass = 68, queue_execute = 10;
-constexpr UINT constant_count = 28;
+// world_cover.hlsl's cbuffer: seven float4s of camera and look, then the places kept clear (one
+// float4 with their count, four with their feet and radii, one with their heights).
+constexpr UINT constant_count = 52;
 
 using CreateViewFn = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, const void*, D3D12_CPU_DESCRIPTOR_HANDLE);
 using CopyDescriptorsFn = void(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, UINT,
@@ -48,6 +50,8 @@ std::atomic<ExecuteFn> original_execute{};
 struct Asked {
     std::mutex mutex;
     Settings settings;
+    std::vector<Clear> clear;
+    std::uint64_t clear_until{}; // keep_clear holds for 300 ms
 };
 Asked& asked() { static auto* value = new Asked; return *value; }
 std::atomic<bool> wanted{};
@@ -630,10 +634,12 @@ bool record_cover(Shared& s) {
     s.next_allocator = (at + 1) % s.allocators.size();
 
     Settings settings;
+    std::vector<Clear> clear;
     {
         auto& a = asked();
         std::lock_guard lock(a.mutex);
         settings = a.settings;
+        if (GetTickCount64() < a.clear_until) clear = a.clear;
     }
     // Views: the picture's copy as the target's format reads it, and the game's depth as it is.
     const UINT view_step = s.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -666,14 +672,24 @@ bool record_cover(Shared& s) {
 
     const auto& m = projector->m;
     const float width = static_cast<float>(colour_desc.Width), height = static_cast<float>(colour_desc.Height);
-    const std::array<float, constant_count> constants{
+    std::array<float, constant_count> constants{
         m[0], m[1], m[2], projector->focal,
         m[4], m[5], m[6], width,
         m[8], m[9], m[10], height,
         m[12], m[13], m[14], 0.1f, // the near distance: it scales distances, not directions; only the noise's size depends on it
         settings.colour[0], settings.colour[1], settings.colour[2], settings.amount,
         settings.facing, settings.softness, settings.brightness, settings.breakup,
-        settings.sparkle, 0, 0, 0};
+        settings.sparkle, 0, 0, 0,
+        static_cast<float>(clear.size()), 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // the four places' feet and radii, below
+        0, 0, 0, 0};
+    for (std::size_t i = 0; i < clear.size() && i < 4; ++i) {
+        constants[32 + i * 4] = clear[i].foot[0];
+        constants[33 + i * 4] = clear[i].foot[1];
+        constants[34 + i * 4] = clear[i].foot[2];
+        constants[35 + i * 4] = clear[i].radius;
+        constants[48 + i] = clear[i].height;
+    }
     ID3D12DescriptorHeap* heaps[] = {s.views.Get()};
     list->SetDescriptorHeaps(1, heaps);
     list->SetGraphicsRootSignature(s.root.Get());
@@ -719,6 +735,15 @@ void set(const Settings& settings) noexcept {
     wanted.store(true);
 }
 void clear() noexcept { wanted.store(false); }
+void keep_clear(std::vector<Clear> places) noexcept {
+    try {
+        if (places.size() > 4) places.resize(4);
+        auto& a = asked();
+        std::lock_guard lock(a.mutex);
+        a.clear = std::move(places);
+        a.clear_until = a.clear.empty() ? 0 : GetTickCount64() + 300;
+    } catch (...) {}
+}
 void allow(bool playing) noexcept {
     const std::uint64_t now = GetTickCount64();
     if (!playing) {

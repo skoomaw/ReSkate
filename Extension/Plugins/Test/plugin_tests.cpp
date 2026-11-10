@@ -331,6 +331,13 @@ struct FakeGame final : Game {
     std::pair<bool, std::uint64_t> effects_state() override { return {effects_ready, effect_epoch}; }
     // One plugin's world cover at a time, as the real one.
     std::string coverer;
+    std::string world_cover_clear(std::string_view plugin, const std::vector<CoverClear>& places) override {
+        if (coverer != plugin) return "this plugin has no cover on the world";
+        std::string line = std::format("keep clear {} {}", plugin, places.size());
+        for (const auto& p : places) line += std::format(" ({:.1f} {:.1f} {:.1f} r{:.2f} h{:.1f})", p.foot[0], p.foot[1], p.foot[2], p.radius, p.height);
+        calls.push_back(line);
+        return {};
+    }
     std::string world_cover(std::string_view plugin, std::optional<WorldCover> c) override {
         if (!coverer.empty() && coverer != plugin) return c ? coverer + " has the world's cover" : std::string{};
         if (!c) {
@@ -4670,6 +4677,13 @@ void plugins_cover_the_world() {
         assert(not pcall(reskate.effects.cover, {colour = {r = 1}}), "a colour has three channels")
         assert(not pcall(reskate.effects.cover, 5), "a cover is a table or nil")
         assert(reskate.effects.cover({}), "every value has a default")
+        assert(reskate.effects.keep_clear({{position = vector.create(1, 2, 3)}, {position = vector.create(4, 5, 6), radius = 1.5, height = 3}}))
+        assert(not pcall(reskate.effects.keep_clear, {{position = vector.create(0, 0, 0), radius = 20}}), "a radius is 0.05 to 10")
+        assert(not pcall(reskate.effects.keep_clear, {{radius = 1}}), "a place has a position")
+        local five = {}
+        for i = 1, 5 do five[i] = {position = vector.create(i, 0, 0)} end
+        assert(not pcall(reskate.effects.keep_clear, five), "at most four places")
+        assert(reskate.effects.keep_clear(nil))
         reskate.log("covered")
     )"}});
     host.apply({snow});
@@ -4679,21 +4693,27 @@ void plugins_cover_the_world() {
     check(game.called("cover snow 0.90 0.95 1.00 0.80 0.60 0.10 2.00 0.50 0.25 0.00") &&
               game.called("cover snow 0.92 0.95 1.00 1.00 0.55 0.15 1.60 0.35 0.00 0.00"),
           "The cover as asked, and its defaults\n" + environment.all());
+    check(game.called("keep clear snow 2 (1.0 2.0 3.0 r0.60 h2.0) (4.0 5.0 6.0 r1.50 h3.0)") && game.called("keep clear snow 0"),
+          "Places kept clear of the cover, with their defaults, and none\n" + environment.all());
     // A second plugin is told whose cover it is; nil from it does not end the first one's.
     host.apply({snow, package("sand", {{manifest_file, manifest(R"("effects")")}, {"plugin/main.lua", R"(
         local ok, why = reskate.effects.cover({colour = {r = 0.8, g = 0.7, b = 0.5}})
         reskate.log(tostring(ok) .. " " .. tostring(why))
+        local kept, not_why = reskate.effects.keep_clear({{position = vector.create(0, 0, 0)}})
+        reskate.log("keep " .. tostring(kept) .. " " .. tostring(not_why))
         assert(reskate.effects.cover(nil))
     )"}})});
     ticks(host, environment, 1);
     check(environment.logged("[sand] nil snow has the world's cover") && !game.called("cover sand none") && game.coverer == "snow",
           "One plugin's cover at a time\n" + environment.all());
+    check(environment.logged("[sand] keep nil this plugin has no cover on the world"), "Only the cover's plugin keeps places clear of it");
     // Without the permission it is refused.
     host.apply({snow, package("sneaky", {{manifest_file, manifest()}, {"plugin/main.lua", R"(
-        reskate.log(tostring(pcall(reskate.effects.cover, {})) .. " " .. tostring(pcall(reskate.effects.cover, nil)))
+        reskate.log(tostring(pcall(reskate.effects.cover, {})) .. " " .. tostring(pcall(reskate.effects.cover, nil)) .. " " ..
+            tostring(pcall(reskate.effects.keep_clear, {})))
     )"}})});
     ticks(host, environment, 1);
-    check(environment.logged("[sneaky] false false"), "effects is needed for a cover\n" + environment.all());
+    check(environment.logged("[sneaky] false false false"), "effects is needed for a cover and its clear places\n" + environment.all());
     check(game.coverer == "snow", "A refused plugin does not take the cover");
     // Unloading the plugin ends its cover.
     host.apply({});

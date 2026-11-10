@@ -1266,6 +1266,7 @@ public:
         if (!cover) {
             if (coverer_ == plugin) {
                 world_cover::clear();
+                world_cover::keep_clear({});
                 coverer_.clear();
             }
             return {};
@@ -1276,6 +1277,13 @@ public:
         s.amount = cover->amount, s.facing = cover->facing, s.softness = cover->softness;
         s.brightness = cover->brightness, s.breakup = cover->breakup, s.sparkle = cover->sparkle;
         world_cover::set(s);
+        return {};
+    }
+    std::string world_cover_clear(std::string_view plugin, const std::vector<CoverClear>& places) override {
+        if (coverer_ != plugin) return "this plugin has no cover on the world";
+        std::vector<world_cover::Clear> clear;
+        for (const auto& place : places) clear.push_back({place.foot, place.radius, place.height});
+        world_cover::keep_clear(std::move(clear));
         return {};
     }
     // ---- viewmodel -----------------------------------------------------------------------------------
@@ -2047,6 +2055,7 @@ public:
         }
         if (coverer_ == plugin) {
             world_cover::clear();
+            world_cover::keep_clear({});
             coverer_.clear();
         }
         if (viewmodeler_ == plugin) {

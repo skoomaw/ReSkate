@@ -334,6 +334,13 @@ public:
         float amount{1}, facing{0.55f}, softness{0.15f}, brightness{1.6f}, breakup{0.35f}, sparkle{0};
     };
     virtual std::string world_cover(std::string_view /*plugin*/, std::optional<WorldCover>) { return unavailable; }
+    // Up to four places kept clear of that cover for the next 300 ms (world_cover::keep_clear): an
+    // upright cylinder each, on its foot in the world. Only for the plugin whose cover it is.
+    struct CoverClear {
+        Vec3 foot{};
+        float radius{0.6f}, height{2.0f};
+    };
+    virtual std::string world_cover_clear(std::string_view /*plugin*/, const std::vector<CoverClear>&) { return unavailable; }
 
     virtual std::string object_physics(std::string_view, std::uint64_t, const std::optional<ObjectPhysics>&) { return unavailable; }
     virtual std::string object_velocity(std::string_view, std::uint64_t, const Vec3&) { return unavailable; }
