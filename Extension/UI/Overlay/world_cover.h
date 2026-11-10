@@ -23,6 +23,9 @@
 // Anything not as expected (the colour's state unknown, the depth and colour not the same size, no
 // depth copy this frame, render passes instead of OMSetRenderTargets) draws nothing that frame. At
 // worst the cover is late and drawn after the game has used the picture: then it is not seen.
+// Also nothing while the colour is half-way through a split barrier, has memory aliased onto it,
+// or is in an unordered-access state. If the game touches the colour from a command list that is
+// not a direct one (async compute, which could run beside our list), the cover stops for good.
 //
 // The surfaces' direction comes from the depth (each pixel's neighbours) and the camera
 // (plugin_camera.h); the game's depth is reversed (1 near, 0 far: capture_image.h), so the sky (0) is
@@ -42,6 +45,10 @@ struct Settings {
 void set(const Settings& settings) noexcept;
 void clear() noexcept;
 bool on() noexcept;
+// Client thread, every tick: whether the world is being played now (a level in play, no game menu
+// open). The cover is drawn only once that has held for two seconds, never on the front page, in
+// menus or while a level loads.
+void allow(bool playing) noexcept;
 
 // Render thread (the overlay): its hooks on the game's device, its queue and the command lists'
 // shared table (through the overlay's own list), installed once with the overlay's graphics.

@@ -45,6 +45,9 @@ struct Asked {
 };
 Asked& asked() { static auto* value = new Asked; return *value; }
 std::atomic<bool> wanted{};
+std::atomic<bool> allowed{};     // the world has been in play for a moment (allow)
+std::atomic<bool> retired{};     // the game's frame is not one the cover can safely go into
+std::uint64_t playing_since{};   // client thread: when play began, 0 out of play
 
 // A view the game made: what it is of, and in which format.
 struct View {
@@ -62,6 +65,7 @@ struct Notes {
     bool colour_state_known{};
     D3D12_RESOURCE_STATES colour_state{};
     bool depth_copied{};   // the depth was copied into ours on it
+    bool unsafe{};         // a split or aliasing barrier on the colour: no cover this frame
 };
 
 struct Shared {
@@ -80,6 +84,8 @@ struct Shared {
     bool colour_state_known{};
     D3D12_RESOURCE_STATES colour_state{};
     bool depth_ready{};    // a list with a depth copy on it submitted this frame
+    bool depth_copied{};   // one recorded since the last present (as the depth tap: the first only)
+    bool unsafe{};         // this frame's colour went through a split or aliasing barrier
     bool pending{};        // the world was drawn in a submitted batch, the cover not yet
     bool drawn{};          // the cover is drawn this frame
     std::uint64_t frame{};
@@ -235,7 +241,7 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
         // The world is finished: the cover goes in just before this batch, in a list of ours.
         if (s.pending && !s.drawn && !world_here) {
             s.pending = false;
-            if (s.depth_ready && s.colour_state_known && record_cover(s)) {
+            if (s.depth_ready && s.colour_state_known && !s.unsafe && record_cover(s)) {
                 s.drawn = true;
                 ID3D12CommandList* ours[] = {s.list.Get()};
                 original(queue, 1, ours);
@@ -252,6 +258,7 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
             if (found == s.notes.end()) continue;
             const auto& n = found->second;
             if (n.depth_copied) s.depth_ready = true;
+            if (n.unsafe) s.unsafe = true;
             if (n.world) {
                 s.colour = n.colour;
                 s.pending = !s.drawn;
@@ -390,6 +397,14 @@ bool record_cover(Shared& s) {
     if (s.failed || !s.colour || !s.depth_copy) return false;
     const auto colour_desc = s.colour->GetDesc();
     if (colour_desc.Width != s.depth_width || colour_desc.Height != s.depth_height) return false;
+    // One plain 2D picture, which CopyResource can copy into ours as it is.
+    if (colour_desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || colour_desc.MipLevels != 1 || colour_desc.DepthOrArraySize != 1 ||
+        colour_desc.SampleDesc.Count != 1)
+        return false;
+    // Only from states a graphics queue's own work leaves it in: never while compute writes it.
+    constexpr auto usable = D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_COPY_SOURCE;
+    if (s.colour_state == D3D12_RESOURCE_STATE_COMMON || (s.colour_state & ~usable) != 0) return false;
     const auto projector = plugin_camera::projector(static_cast<float>(colour_desc.Width), static_cast<float>(colour_desc.Height));
     if (!projector) return false;
     if (!build_resources(s, colour_desc) || !build_pipeline(s, s.colour_format)) return false;
@@ -515,6 +530,16 @@ void set(const Settings& settings) noexcept {
     wanted.store(true);
 }
 void clear() noexcept { wanted.store(false); }
+void allow(bool playing) noexcept {
+    const std::uint64_t now = GetTickCount64();
+    if (!playing) {
+        playing_since = 0;
+        allowed.store(false);
+        return;
+    }
+    if (!playing_since) playing_since = now;
+    allowed.store(now - playing_since >= 2000);
+}
 bool on() noexcept { return wanted.load(); }
 
 void install(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* list) noexcept {
@@ -558,8 +583,8 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
     try {
         auto& s = shared();
         std::lock_guard lock(s.mutex);
-        const bool ready = original_execute.load() && original_targets.load() && !s.failed && s.queue;
-        active.store(ready && wanted.load());
+        const bool ready = original_execute.load() && original_targets.load() && !s.failed && s.queue && !retired.load();
+        active.store(ready && wanted.load() && allowed.load());
         if (!active.load()) {
             s.notes.clear();
             return;
@@ -570,7 +595,7 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
                            "World cover: the world's last drawing was in the frame's last batch, so the cover had no place before post-processing.");
         }
         s.width = width, s.height = height;
-        s.pending = s.drawn = s.depth_ready = false;
+        s.pending = s.drawn = s.depth_ready = s.depth_copied = s.unsafe = false;
         s.colour_state_known = false;
         ++s.frame;
         // Notes left from lists recorded but never submitted would otherwise grow without end.
@@ -609,31 +634,50 @@ void release() noexcept {
 }
 
 void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b, BarrierFn original) noexcept {
-    if (!active.load(std::memory_order_relaxed) || b.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !b.Transition.pResource) return;
-    if (list == our_list.load(std::memory_order_relaxed)) return;
+    if (!active.load(std::memory_order_relaxed) || list == our_list.load(std::memory_order_relaxed)) return;
     try {
+        auto* const colour = colour_now.load(std::memory_order_relaxed);
+        // Memory aliased onto (or off) the world's colour: it is not ours to touch this frame.
+        if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
+            if (colour && (b.Aliasing.pResourceBefore == colour || b.Aliasing.pResourceAfter == colour)) {
+                auto& s = shared();
+                std::lock_guard lock(s.mutex);
+                s.notes[list].unsafe = true;
+            }
+            return;
+        }
+        if (b.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !b.Transition.pResource) return;
         auto* const resource = b.Transition.pResource;
         // The world's colour changing state on this list: where it ends up when the list is submitted.
-        if (resource == colour_now.load(std::memory_order_relaxed)) {
+        if (resource == colour) {
+            if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+                // Another queue works on the picture, unsynchronised with a list of ours: stop for good.
+                if (!retired.exchange(true))
+                    logging::write(logging::Level::warning, logging::Channel::graphics,
+                                   "World cover: off; the game uses the world's picture on another GPU queue.");
+                active.store(false);
+                return;
+            }
             auto& s = shared();
             std::lock_guard lock(s.mutex);
             auto& n = s.notes[list];
             if (!n.colour) n.colour = resource;
+            // Half-way through a split barrier the picture is in no state at all.
+            if (b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) n.unsafe = true;
             n.colour_state_known = true;
             n.colour_state = b.Transition.StateAfter;
             return;
         }
-        // The main depth buffer each time it is done being written: copied, as the tap copies it. Every
-        // time, not only the first: the copy submitted last before the cover is the most complete, and
-        // the game may record a frame's lists before it presents the one before.
+        // The main depth buffer the first time each frame it is done being written (a full barrier, not
+        // a split one): copied, exactly as the depth tap copies it.
         if (!(b.Transition.StateBefore & D3D12_RESOURCE_STATE_DEPTH_WRITE)) return;
         constexpr auto read = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        if (!(b.Transition.StateAfter & read) || (b.Flags & D3D12_RESOURCE_BARRIER_FLAG_END_ONLY)) return;
+        if (!(b.Transition.StateAfter & read) || b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) return;
         if (b.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES && b.Transition.Subresource != 0) return;
         if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) return;
         auto& s = shared();
         std::lock_guard lock(s.mutex);
-        if (!s.device) return;
+        if (!s.device || s.depth_copied) return;
         const auto desc = resource->GetDesc();
         if (!depth_shaped(desc, s.width, s.height)) return;
         if (resource != s.main_depth) {
@@ -669,6 +713,7 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
         from.SubresourceIndex = 0;
         list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
         original(list, 1, &ours[1]);
+        s.depth_copied = true;
         s.notes[list].depth_copied = true;
     } catch (...) {}
 }

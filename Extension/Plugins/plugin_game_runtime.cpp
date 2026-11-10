@@ -1928,6 +1928,8 @@ public:
         return camera_shown_ ? std::string{} : camera_status_.empty() ? "waiting for the game's camera" : camera_status_;
     }
     void apply_camera(std::uintptr_t base, std::uintptr_t client, bool ready, bool phase) {
+        // A plugin's world cover only over a level in play, with no game menu open (world_cover.h).
+        world_cover::allow(ready && base && !multiplayer::sample_game_ui_state(base).in_menu);
         if (multiplayer::party_spectating()) {
             // Spectate has the lease now, and gives the game's camera back itself.
             camera_shown_ = camera_releasing_ = false;
