@@ -709,6 +709,35 @@ struct FakeGame final : Game {
                           : std::format("look {} none", plugin));
         return {};
     }
+    // One plugin's world model at a time, as the real one.
+    std::string world_modeler;
+    std::string world_model_load(std::string_view plugin, const std::filesystem::path& file) override {
+        if (!world_modeler.empty() && world_modeler != plugin) return world_modeler + " has the world model";
+        world_modeler = plugin;
+        calls.push_back(std::format("world model load {} {}", plugin, file.filename().string()));
+        return {};
+    }
+    void world_model_unload(std::string_view plugin) override {
+        if (world_modeler != plugin) return;
+        world_modeler.clear();
+        calls.push_back(std::format("world model unload {}", plugin));
+    }
+    std::optional<WorldModelInfo> world_model_info(std::string_view plugin) override {
+        if (world_modeler != plugin) return std::nullopt;
+        return WorldModelInfo{"ready", {}, {"rib", "indent"}, 0.1f};
+    }
+    std::string world_model_show(std::string_view plugin, std::optional<WorldModelLook> l) override {
+        if (world_modeler != plugin) return "this plugin has no world model loaded";
+        if (!l) {
+            calls.push_back(std::format("world model hide {}", plugin));
+            return {};
+        }
+        std::string materials;
+        for (const auto& [name, m] : l->materials) materials += std::format(" {}:{:.2f},{:.2f}", name, m.colour[0], m.opacity);
+        calls.push_back(std::format("world model show {} {:.1f} {:.1f} {:.1f} q{:.2f} s{:.2f} o{:.2f}{}", plugin, l->position[0], l->position[1], l->position[2],
+                                    l->rotation[3], l->scale, l->standard.opacity, materials));
+        return {};
+    }
     // One plugin's viewmodel at a time, as the real one.
     std::string viewmodeler;
     std::string viewmodel_load(std::string_view plugin, const std::filesystem::path& file) override {
@@ -1247,6 +1276,7 @@ struct FakeGame final : Game {
         effects_clear(plugin);
         (void)world_cover(plugin, std::nullopt);
         viewmodel_unload(plugin);
+        world_model_unload(plugin);
         board_material::detail::release(declared_holds, plugin, std::nullopt, std::nullopt);
         std::vector<std::uint64_t> ids;
         for (const auto& [id, owner] : physics_owners) if (owner == plugin) ids.push_back(id);
@@ -4287,6 +4317,53 @@ void plugins_have_what_a_prop_hunt_needs() {
     check(game.called("entity prophunt 3 World/Props/TrashCan_01 0.00 0.00 0.00 0.00 on 0 7 held ground 1.5 ghost"), "on the floor and not solid\n" + environment.all());
 }
 
+// A world model (a board's frosted tread): loaded from the package, shown in the world with its materials'
+// colours and opacities, the game's near distance read back; one plugin's at a time, given up when it
+// stops, and only with the permission.
+void plugins_show_a_world_model() {
+    TestEnvironment environment;
+    auto& game = environment.fake;
+    Host host(environment, Side::client);
+    const std::string main = R"(
+        assert(reskate.world_model.info() == nil, "nothing loaded yet")
+        assert(not reskate.world_model.show({position = vector.create(0, 0, 0)}), "nothing to show")
+        assert(not pcall(reskate.world_model.load, "plugin/main.lua"), "a world model is a .rsvm file")
+        assert(not pcall(reskate.world_model.load, "../other/tread.rsvm"), "inside the package")
+        assert(reskate.world_model.load("models/tread.rsvm"))
+        local info = reskate.world_model.info()
+        assert(info.status == "ready" and info.materials[1] == "rib" and math.abs(info.near - 0.1) < 1e-6, "its materials and the near distance")
+        assert(reskate.world_model.show({position = vector.create(1, 2, 3), rotation = {0, 0, 0, 1}, scale = 1.5, opacity = 0.4,
+            materials = {rib = {colour = vector.create(0.9, 0.9, 0.9), opacity = 0.65}}}))
+        assert(not pcall(reskate.world_model.show, {}), "a position is needed")
+        assert(not pcall(reskate.world_model.show, {position = vector.create(0, 0, 0), opacity = 2}), "opacity 0 to 1")
+        assert(not pcall(reskate.world_model.show, {position = vector.create(0, 0, 0), rotation = {0, 0, 0, 0}}), "a unit quaternion")
+        assert(not pcall(reskate.world_model.show, {position = vector.create(0, 0, 0), materials = {{opacity = 1}}}), "materials by name")
+        assert(reskate.world_model.hide())
+        reskate.log("frosted")
+    )";
+    host.apply({package("snowskate", {{manifest_file, manifest(R"("world.model")")}, {"plugin/main.lua", main}, {"models/tread.rsvm", "RSVM"}})});
+    ticks(host, environment, 1);
+    running(host, "snowskate", environment);
+    check(environment.logged("[snowskate] frosted"), "A world model's calls work\n" + environment.all());
+    check(game.called("world model load snowskate tread.rsvm") && game.called("world model show snowskate 1.0 2.0 3.0 q1.00 s1.50 o0.40 rib:0.90,0.65") &&
+              game.called("world model hide snowskate"),
+          "Loaded, shown where asked with its materials, and hidden\n" + environment.all());
+    host.apply({package("snowskate", {{manifest_file, manifest(R"("world.model")")}, {"plugin/main.lua", main}, {"models/tread.rsvm", "RSVM"}}),
+                package("rival", {{manifest_file, manifest(R"("world.model")")}, {"plugin/main.lua", R"(
+        local ok, why = reskate.world_model.load("tread.rsvm")
+        reskate.log(tostring(ok) .. " " .. tostring(why))
+    )"}, {"tread.rsvm", "RSVM"}})});
+    ticks(host, environment, 1);
+    check(environment.logged("[rival] false snowskate has the world model"), "One plugin's world model at a time\n" + environment.all());
+    host.apply({package("sneaky", {{manifest_file, manifest()}, {"plugin/main.lua", R"(
+        reskate.log(tostring(pcall(reskate.world_model.load, "tread.rsvm")) .. " " ..
+            tostring(pcall(reskate.world_model.show, {position = vector.create(0, 0, 0)})) .. " " .. tostring(pcall(reskate.world_model.info)))
+    )"}, {"tread.rsvm", "RSVM"}})});
+    ticks(host, environment, 1);
+    check(environment.logged("[sneaky] false false false"), "world.model is needed\n" + environment.all());
+    check(game.world_modeler.empty(), "Given up when its plugin stops\n" + environment.all());
+}
+
 // A viewmodel (a shooter's arms and gun): loaded from the package, shown with a placement, its clips
 // played, a bone read back; one plugin's at a time, given up when it stops, and only with the permission.
 void plugins_show_a_viewmodel() {
@@ -7247,6 +7324,7 @@ int main() {
         run(plugins_reach_cruise_and_read_the_mouse);
         run(plugins_set_the_flip_speed);
         run(plugins_show_a_viewmodel);
+        run(plugins_show_a_world_model);
         run(plugins_carry_and_take_a_step_in_the_camera_cycle);
         run(plugins_show_items_on_the_board);
         run(plugins_cover_the_world);

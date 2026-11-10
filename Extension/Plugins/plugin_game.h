@@ -1181,6 +1181,30 @@ public:
         Vec3 position{}, x{}, y{}, z{};
     };
     virtual std::optional<ViewmodelBone> viewmodel_bone(std::string_view /*plugin*/, std::string_view /*bone*/) { return std::nullopt; }
+    // ---- world model: a model drawn into the world (Extension/UI/Overlay/world_model.h) ---------------
+    // One plugin's at a time: the one that loaded it, until it unloads it or stops.
+    virtual std::string world_model_load(std::string_view /*plugin*/, const std::filesystem::path& /*file*/) { return unavailable; }
+    virtual void world_model_unload(std::string_view /*plugin*/) {}
+    struct WorldModelInfo {
+        std::string status; // "loading", "ready" or "failed"
+        std::string why;
+        std::vector<std::string> materials;
+        std::optional<float> near; // the game's near distance, once measured
+    };
+    virtual std::optional<WorldModelInfo> world_model_info(std::string_view /*plugin*/) { return std::nullopt; }
+    struct WorldModelMaterial {
+        Vec3 colour{0.92f, 0.95f, 1.0f};
+        float opacity{0.5f};
+    };
+    // Where and how it is drawn, for the next 300 ms (world space).
+    struct WorldModelLook {
+        Vec3 position{};
+        std::array<float, 4> rotation{0, 0, 0, 1};
+        float scale{1}, glance{0.5f};
+        WorldModelMaterial standard;
+        std::vector<std::pair<std::string, WorldModelMaterial>> materials;
+    };
+    virtual std::string world_model_show(std::string_view /*plugin*/, std::optional<WorldModelLook>) { return unavailable; }
     // Everything a plugin holds of the game (its HUD hide, nametags, binds), when it stops.
     virtual void release(std::string_view /*plugin*/) {}
 };

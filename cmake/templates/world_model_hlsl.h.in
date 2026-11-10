@@ -1,0 +1,6 @@
+#pragma once
+// Generated from Extension/UI/Overlay/world_model.hlsl (cmake/UI.cmake).
+namespace dingosdk::world_model {
+inline constexpr char world_model_hlsl[] =
+R"world_model_hlsl(@world_model_hlsl_source@)world_model_hlsl";
+}

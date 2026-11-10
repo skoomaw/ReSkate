@@ -62,6 +62,7 @@ add_library(dingosdk_overlay STATIC
     Extension/UI/Overlay/viewmodel.cpp
     Extension/UI/Overlay/viewmodel_model.cpp
     Extension/UI/Overlay/world_cover.cpp
+    Extension/UI/Overlay/world_model.cpp
 )
 # `capture depth` (DINGOSDK_DEV_TOOLS): the depth probe, a research tool.
 if(DINGOSDK_DEV_TOOLS)
@@ -155,6 +156,29 @@ if(WIN32 AND DINGOSDK_FXC)
         VERBATIM)
     add_custom_target(dingosdk_world_cover_check DEPENDS "${world_cover_checked}")
     add_dependencies(dingosdk_overlay dingosdk_world_cover_check)
+endif()
+
+# A plugin's world model (reskate.world_model), drawn at the cover's moment, the same way.
+set(world_model_hlsl_path "${PROJECT_SOURCE_DIR}/Extension/UI/Overlay/world_model.hlsl")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${world_model_hlsl_path}")
+file(READ "${world_model_hlsl_path}" world_model_hlsl_source)
+string(LENGTH "${world_model_hlsl_source}" world_model_hlsl_length)
+if(world_model_hlsl_length GREATER 15000)
+    message(FATAL_ERROR "world_model.hlsl is longer than one MSVC string literal: split it as the screen look's is")
+endif()
+configure_file(cmake/templates/world_model_hlsl.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/world_model_hlsl.h" @ONLY)
+if(WIN32 AND DINGOSDK_FXC)
+    set(world_model_checked "${CMAKE_CURRENT_BINARY_DIR}/generated/world_model.checked")
+    add_custom_command(OUTPUT "${world_model_checked}"
+        COMMAND "${DINGOSDK_FXC}" /nologo /T vs_5_0 /E vs_main /Fo "${CMAKE_CURRENT_BINARY_DIR}/generated/world_model_vs.cso" "${world_model_hlsl_path}"
+        COMMAND "${DINGOSDK_FXC}" /nologo /T ps_5_0 /E ps_main /Fo "${CMAKE_CURRENT_BINARY_DIR}/generated/world_model_ps.cso" "${world_model_hlsl_path}"
+        COMMAND "${DINGOSDK_FXC}" /nologo /T ps_5_0 /E ps_measure /Fo "${CMAKE_CURRENT_BINARY_DIR}/generated/world_model_measure.cso" "${world_model_hlsl_path}"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${world_model_checked}"
+        DEPENDS "${world_model_hlsl_path}"
+        COMMENT "Checking the world model's shader with fxc"
+        VERBATIM)
+    add_custom_target(dingosdk_world_model_check DEPENDS "${world_model_checked}")
+    add_dependencies(dingosdk_overlay dingosdk_world_model_check)
 endif()
 
 # The window shown from the moment ReSkate loads until the game's own window appears.

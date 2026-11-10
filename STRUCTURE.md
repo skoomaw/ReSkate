@@ -190,7 +190,11 @@ The Luau plugin host. A plugin is a folder in `Mods/` with a `reskate-plugin.jso
   owns their native references, surface attachments and world lifetime.
   `reskate.effects.cover` (same permission) lays a cover (snow, sand, dust) over the world's upward-facing
   surfaces, drawn by `Extension/UI/Overlay/world_cover` into the world's picture before the game's
-  post-processing and UI.
+  post-processing and UI. `reskate.world_model` (permission `world.model`) draws a plugin's `.rsvm` into the
+  world at the same moment (`Extension/UI/Overlay/world_model`), see-through where its materials say, hidden
+  by the game's depth.
+- `reskate.outfit.board_set` / `board_clear` (permission `outfit`) — an item shown on the local board's
+  deck, grip, trucks or wheels over the player's own, display only (`Extension/Skater/board_overlay`).
 - [Item origins and favorites](https://docs.reskate.dev/plugins/api/mods) — `reskate.mods.item_origins` and
   `reskate.menu.favorites`, read-only, for plugins that filter the item grids.
 - [Other players' items](https://docs.reskate.dev/plugins/api/session#other-players-items) — `reskate.session.outfit` and

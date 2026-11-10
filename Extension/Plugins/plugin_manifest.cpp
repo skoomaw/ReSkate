@@ -22,7 +22,9 @@ namespace {
 // throwdown kit (modes, documents, the native flag); "server.parks" a dedicated server's park mods
 // (reskate.server.parks, park_spawn, park_remove); "variants" choosing which of its own mod's
 // variants is in the game (reskate.package.choose); "viewmodel" a model of its own drawn in front of
-// the camera (reskate.viewmodel); "strings" the text the game shows for its ids (reskate.strings).
+// the camera (reskate.viewmodel); "world.model" a model of its own drawn into the world, through which
+// what is behind it may show (reskate.world_model); "strings" the text the game shows for its ids
+// (reskate.strings).
 // "outfit.stand_ins" what this PC shows in place of other players' items it does not have
 // (reskate.outfit.stand_ins, Extension/Multiplayer/Remote/stand_ins.h); never a paid store item.
 // "world.physics" native rigid bodies the plugin
@@ -56,7 +58,7 @@ constexpr std::array<std::string_view, 64> permissions{
     "session.skaters", "session.nametags", "net.session", "net.http", "voice.control", "chat.read",
     "chat.send", "chat.local", "chat.commands", "server", "server.parks", "throwdowns", "replay", "music", "progression.read", "settings.read", "audio.ui", "audio", "outfit", "board", "mods.read",
     "events.physics", "game.speed", "files", "variants", "settings.write", "room", "capture", "effects", "events.physics.geometry", "viewmodel", "strings", "outfit.stand_ins",
-    "objects.physics", "marker.read", "ui.models", "hud.score"};
+    "objects.physics", "marker.read", "ui.models", "hud.score", "world.model"};
 }
 
 bool known_permission(std::string_view name) noexcept {

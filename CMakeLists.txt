@@ -502,6 +502,11 @@ if(DINGOSDK_BUILD_PLUGIN_TESTS)
     add_executable(dingosdk_viewmodel_tests Extension/UI/Overlay/Test/viewmodel_model_tests.cpp Extension/UI/Overlay/viewmodel_model.cpp)
     target_include_directories(dingosdk_viewmodel_tests PRIVATE "${PROJECT_SOURCE_DIR}")
     add_test(NAME viewmodel COMMAND dingosdk_viewmodel_tests "${PROJECT_SOURCE_DIR}/contrib/plugins/fps/viewmodel/pistol.rsvm")
+    # reskate.world_model's measure of the game's near distance and its placement
+    # (Extension/UI/Overlay/world_model_math.h), pure.
+    add_executable(dingosdk_world_model_tests Extension/UI/Overlay/Test/world_model_math_tests.cpp)
+    target_include_directories(dingosdk_world_model_tests PRIVATE "${PROJECT_SOURCE_DIR}")
+    add_test(NAME world_model COMMAND dingosdk_world_model_tests)
 endif()
 if(DINGOSDK_BUILD_PLUGIN_TESTS AND WIN32)
     # The owned-body service itself (Extension/World/owned_bodies.cpp), over a constructed local

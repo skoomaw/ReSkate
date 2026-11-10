@@ -1,5 +1,6 @@
 #include "world_cover.h"
 #include "world_cover_hlsl.h" // generated from world_cover.hlsl (cmake/UI.cmake)
+#include "world_model.h"
 #include "Engine/Core/Hooks/hooks.h"
 #include "Engine/Core/Log/logging.h"
 #include "Extension/Plugins/plugin_camera.h"
@@ -45,6 +46,9 @@ struct Asked {
 };
 Asked& asked() { static auto* value = new Asked; return *value; }
 std::atomic<bool> wanted{};
+// A plugin's world model (world_model.h) is drawn at the cover's moment, in the cover's list: the frame is
+// followed for either. Taken once a frame (present), for the barrier hook that asks on() so often.
+std::atomic<bool> model_wanted{};
 std::atomic<bool> allowed{};     // the world has been in play for a moment (allow)
 std::atomic<bool> retired{};     // the game's frame is not one the cover can safely go into
 std::uint64_t playing_since{};   // client thread: when play began, 0 out of play
@@ -427,7 +431,8 @@ bool record_cover(Shared& s) {
     if (s.colour_state == D3D12_RESOURCE_STATE_COMMON || (s.colour_state & ~usable) != 0) return false;
     const auto projector = plugin_camera::projector(static_cast<float>(colour_desc.Width), static_cast<float>(colour_desc.Height));
     if (!projector) return false;
-    if (!build_resources(s, colour_desc) || !build_pipeline(s, s.colour_format)) return false;
+    const bool cover = wanted.load(), model = model_wanted.load();
+    if (!build_resources(s, colour_desc) || (cover && !build_pipeline(s, s.colour_format))) return false;
     // An allocator the GPU has finished with, or none this frame.
     const std::size_t at = s.next_allocator;
     if (s.fence->GetCompletedValue() < s.allocator_fence[at]) return false;
@@ -479,19 +484,38 @@ bool record_cover(Shared& s) {
         settings.colour[0], settings.colour[1], settings.colour[2], settings.amount,
         settings.facing, settings.softness, settings.brightness, settings.breakup,
         settings.sparkle, 0, 0, 0};
-    ID3D12DescriptorHeap* heaps[] = {s.views.Get()};
-    list->SetDescriptorHeaps(1, heaps);
-    list->SetGraphicsRootSignature(s.root.Get());
-    list->SetPipelineState(s.pipeline.Get());
-    list->SetGraphicsRoot32BitConstants(0, constant_count, constants.data(), 0);
-    list->SetGraphicsRootDescriptorTable(1, s.views->GetGPUDescriptorHandleForHeapStart());
-    const D3D12_VIEWPORT viewport{0, 0, width, height, 0, 1};
-    const D3D12_RECT scissor{0, 0, static_cast<LONG>(colour_desc.Width), static_cast<LONG>(colour_desc.Height)};
-    list->RSSetViewports(1, &viewport);
-    list->RSSetScissorRects(1, &scissor);
-    list->OMSetRenderTargets(1, &target, FALSE, nullptr);
-    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    list->DrawInstanced(3, 1, 0, 0);
+    if (cover) {
+        ID3D12DescriptorHeap* heaps[] = {s.views.Get()};
+        list->SetDescriptorHeaps(1, heaps);
+        list->SetGraphicsRootSignature(s.root.Get());
+        list->SetPipelineState(s.pipeline.Get());
+        list->SetGraphicsRoot32BitConstants(0, constant_count, constants.data(), 0);
+        list->SetGraphicsRootDescriptorTable(1, s.views->GetGPUDescriptorHandleForHeapStart());
+        const D3D12_VIEWPORT viewport{0, 0, width, height, 0, 1};
+        const D3D12_RECT scissor{0, 0, static_cast<LONG>(colour_desc.Width), static_cast<LONG>(colour_desc.Height)};
+        list->RSSetViewports(1, &viewport);
+        list->RSSetScissorRects(1, &scissor);
+        list->OMSetRenderTargets(1, &target, FALSE, nullptr);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        list->DrawInstanced(3, 1, 0, 0);
+    }
+    if (model) {
+        world_model::Frame frame;
+        frame.device = s.device;
+        frame.list = list;
+        frame.target = target;
+        frame.format = s.colour_format;
+        frame.picture = s.picture.Get();
+        frame.depth = s.main_depth;
+        frame.depth_format = depth_read;
+        frame.width = static_cast<std::uint32_t>(colour_desc.Width);
+        frame.height = colour_desc.Height;
+        frame.camera = projector->m;
+        frame.focal = projector->focal;
+        frame.fence_this = s.fence_value + 1; // hooked_execute signals this once our list is submitted
+        frame.fence_done = s.fence->GetCompletedValue();
+        (void)world_model::record(frame);
+    }
 
     transition(list, s.colour, D3D12_RESOURCE_STATE_RENDER_TARGET, before);
     transition(list, s.picture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -533,7 +557,7 @@ void allow(bool playing) noexcept {
     if (!playing_since) playing_since = now;
     allowed.store(now - playing_since >= 2000);
 }
-bool on() noexcept { return wanted.load(); }
+bool on() noexcept { return wanted.load() || model_wanted.load(); }
 
 void install(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* list) noexcept {
     if (!device || !queue || !list) return;
@@ -577,7 +601,8 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
         auto& s = shared();
         std::lock_guard lock(s.mutex);
         const bool ready = original_execute.load() && original_targets.load() && !s.failed && s.queue && !retired.load();
-        active.store(ready && wanted.load() && allowed.load());
+        model_wanted.store(world_model::wanted());
+        active.store(ready && (wanted.load() || model_wanted.load()) && allowed.load());
         if (!active.load()) {
             s.notes.clear();
             return;
@@ -604,6 +629,7 @@ void release() noexcept {
         active.store(false);
         // The overlay waits for the GPU before it tears down; ours went on the same queue.
         our_list.store(nullptr);
+        world_model::release();
         s.list.Reset();
         for (auto& allocator : s.allocators) allocator.Reset();
         s.allocator_fence = {};

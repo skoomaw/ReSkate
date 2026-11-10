@@ -28,6 +28,9 @@
 // or is in an unordered-access state. If the game touches the colour from a command list that is
 // not a direct one (async compute, which could run beside our list), the cover stops for good.
 //
+// A plugin's world model (world_model.h) is drawn at the same moment, in the same list, after the cover:
+// the frame is followed while either is wanted, and on() says so.
+//
 // The surfaces' direction comes from the depth (each pixel's neighbours) and the camera
 // (plugin_camera.h); the game's depth is reversed (1 near, 0 far: capture_image.h), so the sky (0) is
 // never covered.

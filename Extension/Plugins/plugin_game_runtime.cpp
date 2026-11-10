@@ -80,6 +80,7 @@
 #include "Extension/UI/Overlay/screen_look.h"
 #include "Extension/UI/Overlay/world_cover.h"
 #include "Extension/UI/Overlay/viewmodel.h"
+#include "Extension/UI/Overlay/world_model.h"
 #include "Extension/UI/Overlay/scripted_pad.h"
 #include "Engine/Game/Input/pad_output.h"
 #include "Engine/Game/Skater/animation_values.h"
@@ -1339,6 +1340,44 @@ public:
         if (!found) return std::nullopt;
         return ViewmodelBone{found->position, found->x, found->y, found->z};
     }
+    // ---- world model ---------------------------------------------------------------------------------
+    std::string world_model_load(std::string_view plugin, const std::filesystem::path& file) override {
+        if (!world_modeler_.empty() && world_modeler_ != plugin) return world_modeler_ + " has the world model";
+        world_modeler_ = plugin;
+        world_model::load(file);
+        return {};
+    }
+    void world_model_unload(std::string_view plugin) override {
+        if (world_modeler_ != plugin) return;
+        world_model::unload();
+        world_modeler_.clear();
+    }
+    std::optional<WorldModelInfo> world_model_info(std::string_view plugin) override {
+        if (world_modeler_ != plugin) return std::nullopt;
+        auto now = world_model::info();
+        WorldModelInfo out;
+        out.status = now.status == world_model::Status::ready ? "ready" : now.status == world_model::Status::failed ? "failed" : "loading";
+        out.why = std::move(now.why);
+        out.materials = std::move(now.materials);
+        out.near = now.near;
+        return out;
+    }
+    std::string world_model_show(std::string_view plugin, std::optional<WorldModelLook> look) override {
+        if (world_modeler_ != plugin) return "this plugin has no world model loaded";
+        if (!look) {
+            world_model::hide();
+            return {};
+        }
+        world_model::Look w;
+        w.position = look->position;
+        w.rotation = look->rotation;
+        w.scale = look->scale;
+        w.glance = look->glance;
+        w.standard = {look->standard.colour, look->standard.opacity};
+        for (const auto& [name, material] : look->materials) w.materials[name] = {material.colour, material.opacity};
+        world_model::show(w);
+        return {};
+    }
     std::string screen_slap(std::string_view plugin) override {
         if (looker_ != plugin || GetTickCount64() >= look_at_ + 300) return "only over this plugin's screen look";
         screen_look::slap();
@@ -2060,6 +2099,10 @@ public:
             viewmodel::unload();
             viewmodeler_.clear();
         }
+        if (world_modeler_ == plugin) {
+            world_model::unload();
+            world_modeler_.clear();
+        }
         if (poser_ == plugin) {
             skater_animation::pose({}, 1);
             poser_.clear();
@@ -2144,6 +2187,7 @@ private:
     std::string looker_;  // the plugin whose look is on the screen (screen_look)
     std::string coverer_; // the plugin whose cover is over the world (world_cover)
     std::string viewmodeler_; // the plugin whose viewmodel is loaded (viewmodel_load)
+    std::string world_modeler_; // the plugin whose world model is loaded (world_model_load)
     std::uint64_t look_at_{};
     std::uint64_t reach_at_{};
     struct MouseReader {
