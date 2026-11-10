@@ -54,7 +54,7 @@ struct Clear {
 // Client thread. On until clear().
 void set(const Settings& settings) noexcept;
 void clear() noexcept;
-// Client thread: up to four places kept clear for the next 300 ms (set them every tick); none ends it.
+// Client thread: up to three places kept clear for the next 300 ms (set them every tick); none ends it.
 // The first one also measures the depth's scale where its foot shows on screen, which the cylinders
 // need; while that foot is off screen the cover keeps nothing clear.
 void keep_clear(std::vector<Clear> places) noexcept;

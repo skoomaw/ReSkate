@@ -137,7 +137,7 @@ struct EffectsApi {
         if (!why.empty()) { lua_pushnil(L); lua_pushlstring(L, why.data(), why.size()); return 2; }
         lua_pushboolean(L, 1); return 1;
     }
-    // keep_clear({{position = vector, radius = 0.6, height = 2}, ...}): up to four places kept clear of
+    // keep_clear({{position = vector, radius = 0.6, height = 2}, ...}): up to three places kept clear of
     // the plugin's cover for 0.3 s, so every tick (the skater: no snow on the player); {} or nil ends it.
     // Each an upright cylinder standing on `position`, radius 0.05 to 10 m, height 0.1 to 20 m.
     static int keep_clear(lua_State* L) {
@@ -147,7 +147,7 @@ struct EffectsApi {
         if (!lua_isnoneornil(L, 1)) {
             luaL_checktype(L, 1, LUA_TTABLE);
             const int count = static_cast<int>(lua_objlen(L, 1));
-            if (count > 4) luaL_error(L, "at most four places are kept clear");
+            if (count > 3) luaL_error(L, "at most three places are kept clear");
             for (int i = 1; i <= count; ++i) {
                 lua_rawgeti(L, 1, i);
                 if (!lua_istable(L, -1)) luaL_error(L, "a place kept clear is a table");

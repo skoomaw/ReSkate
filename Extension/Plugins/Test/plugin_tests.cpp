@@ -4681,9 +4681,9 @@ void plugins_cover_the_world() {
         assert(reskate.effects.keep_clear({{position = vector.create(1, 2, 3)}, {position = vector.create(4, 5, 6), radius = 1.5, height = 3}}))
         assert(not pcall(reskate.effects.keep_clear, {{position = vector.create(0, 0, 0), radius = 20}}), "a radius is 0.05 to 10")
         assert(not pcall(reskate.effects.keep_clear, {{radius = 1}}), "a place has a position")
-        local five = {}
-        for i = 1, 5 do five[i] = {position = vector.create(i, 0, 0)} end
-        assert(not pcall(reskate.effects.keep_clear, five), "at most four places")
+        local four = {}
+        for i = 1, 4 do four[i] = {position = vector.create(i, 0, 0)} end
+        assert(not pcall(reskate.effects.keep_clear, four), "at most three places")
         assert(reskate.effects.keep_clear(nil))
         reskate.log("covered")
     )"}});
