@@ -111,9 +111,10 @@ struct Shared {
     ComPtr<ID3D12GraphicsCommandList> list;
     ComPtr<ID3D12Fence> fence;
     UINT64 fence_value{};
-    bool failed{}, said_drawn{}, said_late{}, said_depth{}, said_colour{}, said_waiting{};
+    bool failed{}, said_drawn{}, said_late{}, said_depth{}, said_colour{}, said_waiting{}, said_target{};
     unsigned presents_wanted{}; // presents while the cover was wanted and allowed (for the log)
     std::set<std::string> bindings_said; // what the game binds with the world's depth, said once each
+    std::set<ID3D12Resource*> pictures_said; // full-size float pictures seen written, said once each
 };
 Shared& shared() { static auto* value = new Shared; return *value; }
 
@@ -483,6 +484,16 @@ bool record_cover(Shared& s) {
     }
     const auto colour_desc = s.colour->GetDesc();
     if (colour_desc.Width != s.depth_width || colour_desc.Height != s.depth_height) return false;
+    // Ours draws into it: a picture made only for compute (no render target views) is left alone.
+    if (!(colour_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
+        if (!s.said_target) {
+            s.said_target = true;
+            logging::printf(logging::Level::info, logging::Channel::graphics,
+                            "World cover: not drawn; the world's picture (format %u, flags 0x%x) takes no render target.",
+                            static_cast<unsigned>(colour_desc.Format), static_cast<unsigned>(colour_desc.Flags));
+        }
+        return false;
+    }
     // One plain 2D picture, which CopyResource can copy into ours as it is.
     if (colour_desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || colour_desc.MipLevels != 1 || colour_desc.DepthOrArraySize != 1 ||
         colour_desc.SampleDesc.Count != 1)
@@ -724,24 +735,56 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
         }
         if (b.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !b.Transition.pResource) return;
         auto* const resource = b.Transition.pResource;
+        constexpr auto writes = D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        constexpr auto reads = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                               D3D12_RESOURCE_STATE_COPY_SOURCE;
+        const bool written = (b.Transition.StateBefore & writes) && (b.Transition.StateAfter & reads) && !(b.Transition.StateAfter & writes);
         // The world's colour changing state on this list: where it ends up when the list is submitted.
         if (resource == colour) {
-            if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
-                // Another queue works on the picture, unsynchronised with a list of ours: stop for good.
-                if (!retired.exchange(true))
-                    logging::write(logging::Level::warning, logging::Channel::graphics,
-                                   "World cover: off; the game uses the world's picture on another GPU queue.");
-                active.store(false);
-                return;
-            }
             auto& s = shared();
             std::lock_guard lock(s.mutex);
+            if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+                // Another queue works on the picture this frame, unsynchronised with a list of ours.
+                s.unsafe = true;
+                return;
+            }
             auto& n = s.notes[list];
             if (!n.colour) n.colour = resource;
             // Half-way through a split barrier the picture is in no state at all.
             if (b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) n.unsafe = true;
+            if (written) n.world = true; // the picture was drawn into on this list
             n.colour_state_known = true;
             n.colour_state = b.Transition.StateAfter;
+            return;
+        }
+        // The world's lit picture as the game finishes writing it, drawn into or by compute (the game
+        // lights the world in compute: no float target is ever bound with the world's depth, 2026-11-10):
+        // a full-size, floating-point picture going from being written to being read. The last one
+        // written before a batch with none is the one the cover goes into: still before the game's
+        // tone mapping (its output is not floating point) and its UI.
+        if (written && b.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE && resource != main_depth_now.load(std::memory_order_relaxed) &&
+            list->GetType() == D3D12_COMMAND_LIST_TYPE_DIRECT) {
+            const auto desc = resource->GetDesc();
+            const DXGI_FORMAT format = hdr_view_format(desc.Format);
+            if (format == DXGI_FORMAT_UNKNOWN || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.MipLevels != 1 ||
+                desc.DepthOrArraySize != 1 || desc.SampleDesc.Count != 1 || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
+                return;
+            auto& s = shared();
+            std::lock_guard lock(s.mutex);
+            if (!s.depth_width || desc.Width != s.depth_width || desc.Height != s.depth_height) return;
+            auto& n = s.notes[list];
+            n.world = true;
+            n.colour = resource;
+            n.colour_state_known = true;
+            n.colour_state = b.Transition.StateAfter;
+            s.colour_format = format;
+            colour_now.store(resource);
+            if (s.pictures_said.size() < 8 && s.pictures_said.insert(resource).second)
+                logging::printf(logging::Level::info, logging::Channel::graphics,
+                                "World cover: a full-size float picture written (%llux%u, format %u, flags 0x%x, state 0x%x to 0x%x).",
+                                static_cast<unsigned long long>(desc.Width), desc.Height, static_cast<unsigned>(desc.Format), static_cast<unsigned>(desc.Flags),
+                                static_cast<unsigned>(b.Transition.StateBefore), static_cast<unsigned>(b.Transition.StateAfter));
+            if (!s.said_colour) s.said_colour = true;
             return;
         }
         // The main depth buffer: where it goes, so our list knows whether it can read it as it is. Nothing

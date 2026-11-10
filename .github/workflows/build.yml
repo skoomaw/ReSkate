@@ -1,7 +1,7 @@
 name: Build
 
-# Builds ReSkate (ReSkate.dll, the launcher and the server) on Windows and keeps the Release
-# output as a downloadable artifact on the run's page.
+# Builds ReSkate.dll and the launcher on Windows and keeps them as a downloadable artifact on the
+# run's page.
 #
 # Caches, so a build only compiles what changed:
 # - C and C++: sccache, kept in GitHub's Actions cache. Each object it compiles is stored as it
@@ -62,8 +62,10 @@ jobs:
           -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           -DDINGOSDK_OBJECT_DEBUG_INFO=ON
 
+      # Only what ships to players: ReSkate.dll and the launcher. The server is built only when a
+      # change touches it (add dingosdk_server here then).
       - name: Build
-        run: cmake --build build/ci --parallel
+        run: cmake --build build/ci --parallel --target dingosdk_runtime dingosdk_launcher
 
       - name: Cache statistics
         if: always()
@@ -75,7 +77,7 @@ jobs:
           $out = "artifacts/ReSkate"
           New-Item -ItemType Directory -Force $out | Out-Null
           Get-ChildItem build/ci -File |
-            Where-Object { $_.Extension -in '.dll', '.exe' } |
+            Where-Object { $_.Name -in 'ReSkate.dll', 'ReSkateLauncher.exe' } |
             Copy-Item -Destination $out
           Get-ChildItem $out
 
