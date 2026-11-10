@@ -35,8 +35,17 @@ add_dependencies(dingosdk_runtime dingosdk_launcher)
 
 # Release dumps need matching symbols; keep optimization and omit incremental linking.
 # PDBALTPATH embeds only the PDB's file name, not the build machine's folder.
+# DINGOSDK_OBJECT_DEBUG_INFO keeps the debug information in each object (/Z7) instead of a shared
+# compile-time PDB (/Zi): the linker still writes the same PDB, and a compiler cache (CI's sccache)
+# can keep the objects, which it cannot with /Zi.
+option(DINGOSDK_OBJECT_DEBUG_INFO "Debug information in each object file (/Z7), for compiler caches" OFF)
+if(DINGOSDK_OBJECT_DEBUG_INFO)
+    set(dingosdk_debug_info /Z7)
+else()
+    set(dingosdk_debug_info /Zi)
+endif()
 foreach(target dingosdk_runtime dingosdk_launcher dingosdk_server)
-    target_compile_options(${target} PRIVATE /Zi)
+    target_compile_options(${target} PRIVATE ${dingosdk_debug_info})
     target_link_options(${target} PRIVATE /DEBUG:FULL /INCREMENTAL:NO /OPT:REF /OPT:ICF
         "/PDBALTPATH:$<TARGET_PDB_FILE_NAME:${target}>")
 endforeach()
@@ -44,7 +53,7 @@ get_property(crash_report_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(target IN LISTS crash_report_targets)
     get_target_property(kind ${target} TYPE)
     if(kind STREQUAL "STATIC_LIBRARY")
-        target_compile_options(${target} PRIVATE /Zi)
+        target_compile_options(${target} PRIVATE ${dingosdk_debug_info})
     endif()
 endforeach()
 
