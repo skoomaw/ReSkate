@@ -76,16 +76,20 @@ void show(State& s, const SkaterItems& m, std::uint64_t now) {
             if (item.slot == slot) return &item;
         return nullptr;
     };
-    if (const auto fed = skater_items::feed(m, component); fed.follows_outfit()) {
-        // The board as the player chose it (a new one, or ours taken back by the game): what we change is
-        // remembered, to be put back part by part.
+    if (const auto fed = skater_items::feed(m, component); !s.own || fed.follows_outfit() || component != s.component) {
+        // The board as the player chose it (a new one, or ours taken back by the game): how the game feeds
+        // it is kept as it is found, to be written back when it is given back, and what we change is
+        // remembered, to be put back part by part. The skater's component reads 2, 0, 2, 0 while it
+        // follows the outfit (skater_items.h); the board's own words are not known from the game, so
+        // whatever they are is taken, and said in the log.
         SkaterItems::check(now - s.given_back > 1000, "Waiting for the game to put the board back.");
+        if (!s.feed || *s.feed != fed)
+            say(s, std::format("the board is fed {} {} {} {}", fed.words[0], fed.words[1], fed.words[2], fed.words[3]));
         s.feed = fed;
         s.own = false;
         s.shown.clear();
         s.original.clear();
     } else {
-        SkaterItems::check(s.own && s.feed && component == s.component, "The board does not follow the player's board: left alone.");
         // The game changed what we put on (it rebuilt the board from the player's): it is the game's again.
         for (const auto& [slot, item] : s.shown)
             if (const auto* now_there = at(slot); !now_there || now_there->asset != item) {
