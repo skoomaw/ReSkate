@@ -107,8 +107,9 @@ struct Shared {
     ComPtr<ID3D12RootSignature> root;
     ComPtr<ID3D12PipelineState> pipeline;
     DXGI_FORMAT pipeline_format{DXGI_FORMAT_UNKNOWN};
-    std::array<ComPtr<ID3D12CommandAllocator>, 3> allocators;
-    std::array<UINT64, 3> allocator_fence{};
+    // Eight: the GPU runs frames behind, and with three every other frame found none free (2026-11-10).
+    std::array<ComPtr<ID3D12CommandAllocator>, 8> allocators;
+    std::array<UINT64, 8> allocator_fence{};
     std::size_t next_allocator{};
     ComPtr<ID3D12GraphicsCommandList> list;
     ComPtr<ID3D12Fence> fence;
@@ -131,6 +132,11 @@ struct Shared {
     DXGI_FORMAT locked_format{};
     bool locked_seen{};
     unsigned frames_voted{}, locked_missed{};
+    // Why frames went without the cover, counted and said in the log now and then.
+    const char* why{};          // the reason the last try this frame did not draw
+    bool tried{};               // the cover's moment came this frame
+    std::map<std::string, unsigned> outcomes;
+    unsigned outcome_frames{}, outcome_reports{};
 };
 Shared& shared() { static auto* value = new Shared; return *value; }
 
@@ -309,7 +315,10 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
         // The world is finished: the cover goes in just before this batch, in a list of ours.
         if (s.pending && !s.drawn && !world_here) {
             s.pending = false;
-            if (s.colour_state_known && !s.unsafe && !s.depth_elsewhere && record_cover(s)) {
+            s.tried = true;
+            s.why = !s.colour_state_known ? "the picture's state not known" : s.unsafe ? "a split or aliasing barrier, or another queue"
+                  : s.depth_elsewhere ? "the depth moved on another queue" : nullptr;
+            if (!s.why && record_cover(s)) {
                 s.drawn = true;
                 ID3D12CommandList* ours[] = {s.list.Get()};
                 original(queue, 1, ours);
@@ -482,6 +491,7 @@ bool casting_typed(ID3D12Device* device) {
 
 // Records our list: the picture copied, then drawn back with the cover over it. Under the lock.
 bool record_cover(Shared& s) {
+    s.why = "nothing to draw into";
     if (s.failed || !s.colour || !s.main_depth) return false;
     // The game's depth is read where it is, by our list, never copied or moved: only while the game
     // itself has left it readable by pixel shaders, and only through a view its format allows.
@@ -503,9 +513,11 @@ bool record_cover(Shared& s) {
                             "World cover: not drawn; the game's depth (format %u) is in state 0x%x%s at the cover's moment, not one it can be read in as it is.",
                             static_cast<unsigned>(depth_desc.Format), static_cast<unsigned>(s.depth_state), s.depth_state_known ? "" : " (not known)");
         }
+        s.why = "the depth not readable";
         return false;
     }
     const auto colour_desc = s.colour->GetDesc();
+    s.why = "the picture and depth differ in size, shape or state";
     if (colour_desc.Width != s.depth_width || colour_desc.Height != s.depth_height) return false;
     // Ours draws into it: a picture made only for compute (no render target views) is left alone.
     if (!(colour_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
@@ -526,11 +538,18 @@ bool record_cover(Shared& s) {
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_COPY_SOURCE;
     if (s.colour_state == D3D12_RESOURCE_STATE_COMMON || (s.colour_state & ~usable) != 0) return false;
     const auto projector = plugin_camera::projector(static_cast<float>(colour_desc.Width), static_cast<float>(colour_desc.Height));
-    if (!projector) return false;
+    if (!projector) {
+        s.why = "no camera";
+        return false;
+    }
     if (!build_resources(s, colour_desc) || !build_pipeline(s, s.colour_format)) return false;
     // An allocator the GPU has finished with, or none this frame.
     const std::size_t at = s.next_allocator;
-    if (s.fence->GetCompletedValue() < s.allocator_fence[at]) return false;
+    if (s.fence->GetCompletedValue() < s.allocator_fence[at]) {
+        s.why = "no command allocator free";
+        return false;
+    }
+    s.why = "recording failed";
     if (FAILED(s.allocators[at]->Reset()) || FAILED(s.list->Reset(s.allocators[at].Get(), nullptr))) return false;
     s.next_allocator = (at + 1) % s.allocators.size();
 
@@ -596,6 +615,7 @@ bool record_cover(Shared& s) {
     transition(list, s.colour, D3D12_RESOURCE_STATE_RENDER_TARGET, before);
     transition(list, s.picture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
     if (FAILED(list->Close())) return false;
+    s.why = nullptr;
     return true;
 }
 
@@ -695,6 +715,23 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
         }
         s.width = width, s.height = height;
         s.main_missed = s.main_seen ? 0 : s.main_missed + 1;
+        // How this frame went, counted; every 600 frames (the first eight times) said in the log.
+        if (s.locked) {
+            ++s.outcomes[s.drawn ? "drawn" : !s.tried ? (s.pending ? "too late: the picture's last write was in the frame's last batch" : "the picture not written")
+                                                      : (s.why ? s.why : "not drawn")];
+            if (++s.outcome_frames >= 600) {
+                if (s.outcome_reports < 8) {
+                    ++s.outcome_reports;
+                    std::string line = "World cover: the last 600 frames:";
+                    for (const auto& [what, count] : s.outcomes) line += std::format(" {} {};", what, count);
+                    logging::write(logging::Level::info, logging::Channel::graphics, line);
+                }
+                s.outcomes.clear();
+                s.outcome_frames = 0;
+            }
+        }
+        s.tried = false;
+        s.why = nullptr;
         // The picture the cover goes into: voted for over 30 frames, then kept while it is still written.
         if (s.frame_last) {
             ++s.votes[s.frame_last].count;
