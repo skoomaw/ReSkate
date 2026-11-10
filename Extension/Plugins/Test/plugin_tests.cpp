@@ -406,6 +406,13 @@ struct FakeGame final : Game {
         return {};
     }
     void outfit_clear(std::string_view plugin, std::string_view slot) override { calls.push_back(std::format("outfit clear {} {}", plugin, slot)); }
+    std::string outfit_board_set(std::string_view plugin, std::string_view part, std::string_view item) override {
+        calls.push_back(std::format("board item {} {} {}", plugin, part, item));
+        return part == "trucks" || part == "wheels" ? std::string{} : std::string("a part is \"deck\", \"grip\", \"grip_cutout\", \"trucks\" or \"wheels\"");
+    }
+    void outfit_board_clear(std::string_view plugin, std::string_view part) override {
+        calls.push_back(std::format("board item clear {} {}", plugin, part.empty() ? "all" : part));
+    }
     std::string outfit_stand_ins(std::string_view plugin, std::optional<StandIns> wanted) override {
         if (!wanted) {
             calls.push_back(std::format("stand-ins {} default", plugin));
@@ -4766,6 +4773,35 @@ void plugins_carry_and_take_a_step_in_the_camera_cycle() {
     check(environment.logged("[sneaky] false false false false"), "skater.animation, camera and session.nametags are needed\n" + environment.all());
 }
 
+// An item shown on the board in place of the player's own trucks (a snowskate's invisible ones), the
+// part given back, and every part given back; it needs the outfit permission.
+void plugins_show_items_on_the_board() {
+    TestEnvironment environment;
+    auto& game = environment.fake;
+    Host host(environment, Side::client);
+    host.apply({package("snowskate", {{manifest_file, manifest(R"("outfit")")}, {"plugin/main.lua", R"(
+        assert(reskate.outfit.board_set("trucks", "Own_HoverTrucks"))
+        local ok, why = reskate.outfit.board_set("axle", "Own_HoverTrucks")
+        assert(not ok and why:find("a part is"), why)
+        assert(not pcall(reskate.outfit.board_set, "trucks"), "an item is needed")
+        reskate.outfit.board_clear("trucks")
+        reskate.outfit.board_clear()
+        reskate.log("shown")
+    )"}})});
+    ticks(host, environment, 1);
+    running(host, "snowskate", environment);
+    check(environment.logged("[snowskate] shown"), "The calls work\n" + environment.all());
+    check(game.called("board item snowskate trucks Own_HoverTrucks") && game.called("board item clear snowskate trucks") &&
+              game.called("board item clear snowskate all"),
+          "Shown on the trucks, the trucks given back, then every part\n" + environment.all());
+    host.apply({package("sneaky", {{manifest_file, manifest()}, {"plugin/main.lua", R"(
+        reskate.log(tostring(pcall(reskate.outfit.board_set, "trucks", "Own_HoverTrucks")) .. " " .. tostring(pcall(reskate.outfit.board_clear)))
+    )"}})});
+    ticks(host, environment, 1);
+    check(environment.logged("[sneaky] false false"), "outfit is needed\n" + environment.all());
+    check(!game.called("board item sneaky"), "Nothing reached the board without the permission");
+}
+
 // Reading a skater's joints, and the physics tuning read and set.
 void plugins_read_joints_and_tune_physics() {
     TestEnvironment environment;
@@ -7212,6 +7248,7 @@ int main() {
         run(plugins_set_the_flip_speed);
         run(plugins_show_a_viewmodel);
         run(plugins_carry_and_take_a_step_in_the_camera_cycle);
+        run(plugins_show_items_on_the_board);
         run(plugins_cover_the_world);
         run(plugins_read_joints_and_tune_physics);
         run(plugins_type_and_use_the_room);

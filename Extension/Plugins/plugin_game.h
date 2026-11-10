@@ -966,6 +966,10 @@ public:
     virtual std::string outfit_find(std::string_view) { return {}; }
     virtual std::vector<OutfitSlot> outfit_slots() { return {}; }
     virtual std::string outfit_status() { return unavailable; }
+    // Items shown on the local board over the player's own (Extension/Skater/board_overlay.h): a part is
+    // "deck", "grip", "grip_cutout", "trucks" or "wheels". Empty when taken, otherwise why not.
+    virtual std::string outfit_board_set(std::string_view /*plugin*/, std::string_view /*part*/, std::string_view /*item*/) { return unavailable; }
+    virtual void outfit_board_clear(std::string_view /*plugin*/, std::string_view /*part, empty: all*/) {}
     // What the skater wears now (the selected preset): `slot` the kind of item ("Headwear", "Top", ...,
     // "Shoes", in the order worn from head to foot; clothes and accessories only), or the board's part
     // ("Deck", "Grip tape", "Grip cutout", "Trucks", "Wheels").

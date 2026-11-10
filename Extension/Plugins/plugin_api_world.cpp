@@ -2177,6 +2177,25 @@ struct WorldApi {
         game_of(plugin).outfit_clear(plugin.id(), lua_isnoneornil(L, 1) ? std::string{} : checked_text(L, 1, 48, "a slot's name"));
         return 0;
     }
+    // board_set(part, item): the item shown on the local board in place of the player's own in that part
+    // ("deck", "grip", "grip_cutout", "trucks", "wheels"), as the board is drawn and sent to the other
+    // players; the player's saved board never changes, and the game has it back while its menus are up
+    // (Extension/Skater/board_overlay.h). Never a paid store item. true, or false and why not.
+    static int outfit_board_set(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "outfit", "reskate.outfit.board_set");
+        const auto part = checked_text(L, 1, 16, "a board part");
+        const auto item = checked_text(L, 2, 200, "an item's name");
+        if (!within(plugin.services_.now_ms(), plugin.control_second_, plugin.controls_, 4)) return result(L, "asked more than 4 times in a second");
+        return result(L, game_of(plugin).outfit_board_set(plugin.id(), part, item));
+    }
+    // board_clear(part?): the plugin's item on that part (every part) taken off; the player's own is shown again.
+    static int outfit_board_clear(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "outfit", "reskate.outfit.board_clear");
+        game_of(plugin).outfit_board_clear(plugin.id(), lua_isnoneornil(L, 1) ? std::string{} : checked_text(L, 1, 16, "a board part"));
+        return 0;
+    }
     // find(ending): the installed item whose name ends so (any case), or nil.
     static int outfit_find(lua_State* L) {
         auto& plugin = plugin_of(L);
@@ -3472,7 +3491,8 @@ void WorldApi::install(Plugin& plugin, lua_State* L) {
                                    {"sample", animation_sample}, {"joints", animation_joints}, {"trim", animation_trim}, {"edit", animation_edit},
                                    {"save", animation_save}, {"game_clips", animation_game_clips},
                                    {"mirror", animation_mirror}, {"preload", animation_preload}});
-    add_functions(L, "outfit", {{"set", outfit_set}, {"clear", outfit_clear}, {"find", outfit_find}, {"slots", outfit_slots}, {"status", outfit_status}, {"stand_ins", outfit_stand_ins}});
+    add_functions(L, "outfit", {{"set", outfit_set}, {"clear", outfit_clear}, {"find", outfit_find}, {"slots", outfit_slots}, {"status", outfit_status}, {"stand_ins", outfit_stand_ins},
+                                {"board_set", outfit_board_set}, {"board_clear", outfit_board_clear}});
     add_functions(L, "audio", {{"play", audio_play}, {"set", audio_set}, {"stop", audio_stop}, {"playing", audio_playing}, {"preload", audio_preload}});
     add_functions(L, "server", {{"kick", server_kick}, {"say", server_say}, {"tell", server_tell}, {"move", server_move},
                                 {"ban", server_ban}, {"unban", server_unban}, {"parks", server_parks}, {"park_spawn", server_park_spawn},

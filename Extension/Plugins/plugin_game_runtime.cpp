@@ -23,6 +23,7 @@
 #include "plugin_sound.h"
 #include "Extension/Skater/skater_events.h"
 #include "Extension/Skater/outfit_overlay.h"
+#include "Extension/Skater/board_overlay.h"
 #include "Extension/Skater/board_pose.h"
 #include "Extension/Customization/board_material.h"
 #include "Extension/Localization/text_overrides.h"
@@ -682,6 +683,10 @@ public:
         return out;
     }
     std::string outfit_status() override { return outfit_overlay::status(); }
+    std::string outfit_board_set(std::string_view plugin, std::string_view part, std::string_view item) override {
+        return board_overlay::set(std::string(plugin), std::string(part), std::string(item));
+    }
+    void outfit_board_clear(std::string_view plugin, std::string_view part) override { board_overlay::clear(plugin, part); }
     std::string outfit_on_top(std::string_view plugin, std::vector<std::string> items) override {
         return outfit_overlay::set_layers(std::string(plugin), std::move(items));
     }
@@ -1507,6 +1512,7 @@ public:
         game_speed::tick();
         launches::tick(client);
         outfit_overlay::tick();
+        board_overlay::tick();
         board_pose::tick(base, local_skater_component(base, client));
         board_material::tick(base, client);
         const bool allowed = !multiplayer::local_throwdown_active();
@@ -2012,6 +2018,7 @@ public:
         plugin_sound::stop_all(plugin);
         effects::clear(plugin);
         outfit_overlay::clear(plugin);
+        board_overlay::clear(plugin);
         item_browser::release_owner(plugin);
         (void)outfit_overlay::set_layers(std::string(plugin), {});
         multiplayer::stand_ins::clear(plugin);
