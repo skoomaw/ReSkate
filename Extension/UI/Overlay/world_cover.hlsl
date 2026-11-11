@@ -23,8 +23,11 @@ Texture2D<float4> scene : register(t0);
 Texture2D<float> depth : register(t1);
 Texture2D<float2> last_cover : register(t2);
 // [0] = (points, the box they lie in: min x, min z, max x), [1] = (max z, min y, max y, -), then two a
-// point, oldest first: (where, width), (how strong it still is, 0 to 1, -, -, -).
+// point, oldest first: (where, width), (how strong it still is, 0 to 1, -, -, -). After the most points
+// (world_cover.cpp's most_trail), the cameras ps_measure tries: each its right, up, back and eye.
 StructuredBuffer<float4> trail : register(t3);
+#define MOST_TRAIL 256
+#define CANDIDATES 3
 SamplerState linear_clamp : register(s0);
 
 struct Vertex { float4 position : SV_Position; };
@@ -65,20 +68,48 @@ float3 world_at(int2 p, float d, float near_distance) {
 // Where its foot shows first; where its middle shows (a metre up, its surface a little nearer) when the
 // foot is off screen, as in a close view. 0 when neither shows. The camera's own near plane is not
 // known, and without it distances are only right in proportion.
-float measure_at(float3 target, float nearer) {
-    const float3 to = target - eye_near.xyz;
-    const float along_view = dot(to, -back_height.xyz);
+float measure_with(float3 right, float3 up, float3 back, float3 eye, float3 target, float nearer) {
+    const float3 to = target - eye;
+    const float along_view = dot(to, -back);
     if (along_view < 0.3) return 0;
-    const float2 at = float2(up_width.w * 0.5 + dot(to, right_focal.xyz) * right_focal.w / along_view,
-                             back_height.w * 0.5 - dot(to, up_width.xyz) * right_focal.w / along_view);
+    const float2 at = float2(up_width.w * 0.5 + dot(to, right) * right_focal.w / along_view,
+                             back_height.w * 0.5 - dot(to, up) * right_focal.w / along_view);
     if (any(at < 0) || at.x >= up_width.w || at.y >= back_height.w) return 0;
     const float there = depth_at(int2(at));
     return there > 0 ? (along_view - nearer) * there : 0;
+}
+float measure_at(float3 target, float nearer) {
+    return measure_with(right_focal.xyz, up_width.xyz, back_height.xyz, eye_near.xyz, target, nearer);
 }
 float measured_near() {
     if (clear_info.x < 1) return 0;
     const float foot = measure_at(clears[0].xyz, 0);
     return foot > 0 ? foot : measure_at(clears[0].xyz + float3(0, 1, 0), 0.12);
+}
+
+// Measurements for world_cover.cpp to choose the camera and the near distance by (a 32 x 3 target, read
+// back by the CPU): row y with candidate camera y, column x one point whose place in the world is known:
+// 0 the skater's foot, 1 their middle, 2 to 31 the ground round them at the foot's height (three rings).
+// Each is the near distance that point says the depth is over, or 0 off screen. With the right camera
+// they agree; with a camera a frame off they scatter. The CPU keeps the steady middle of them: the
+// distance measured at one pixel jumped as the skater's foot, board or shoe showed there, and the
+// trails and the places kept clear slid about with it (2026-11-11).
+float ps_measure(Vertex input) : SV_Target {
+    const int2 p = int2(input.position.xy);
+    if (clear_info.x < 1 || p.y >= CANDIDATES) return 0;
+    const int at = 2 + MOST_TRAIL * 2 + p.y * 4;
+    float3 target = clears[0].xyz;
+    float nearer = 0;
+    if (p.x == 1) {
+        target += float3(0, 1, 0);
+        nearer = 0.12;
+    } else if (p.x >= 2) {
+        const int k = p.x - 2;
+        const float radius = k < 10 ? 0.5 : k < 20 ? 0.9 : 1.4;
+        const float angle = (k % 10) * 0.6283185 + (k / 10) * 0.31;
+        target += float3(cos(angle) * radius, 0, sin(angle) * radius);
+    }
+    return measure_with(trail[at].xyz, trail[at + 1].xyz, trail[at + 2].xyz, trail[at + 3].xyz, target, nearer);
 }
 
 float hash(float2 p) {
@@ -178,8 +209,10 @@ Output ps_main(Vertex input) {
     out_.colour = under;
     out_.cover = float2(0, 0);
     const float d = depth_at(p);
-    const float near_measured = measured_near();
-    const float near_distance = near_measured > 0 ? near_measured : eye_near.w;
+    // The near distance the CPU holds from the measurements of many frames (eye_near.w), else this
+    // frame's own from the skater's foot; 0 when neither is known.
+    const float near_measured = eye_near.w > 0 ? eye_near.w : measured_near();
+    const float near_distance = near_measured > 0 ? near_measured : 0.1;
     const float exposure = exposure_now();
     // The sky, and anything at the near plane (the camera inside something): snow falls in front of it.
     if (!(d > 0.0 && d < 1.0)) {
@@ -192,7 +225,7 @@ Output ps_main(Vertex input) {
     // The patchiness, from where the point is at a scale that never changes: with the measured one it
     // jumped whenever the measurement came and went (the skater's feet in and out of view), and the
     // snow flashed on and off with it (2026-11-10).
-    const float3 steady = world_at(p, d, eye_near.w);
+    const float3 steady = world_at(p, d, 0.1);
     // The surface's direction from its neighbours: on each axis the one nearer in depth, so an edge
     // against something further away does not bend it.
     const float dl = depth_at(p - int2(1, 0)), dr = depth_at(p + int2(1, 0));
@@ -270,7 +303,11 @@ Output ps_main(Vertex input) {
             }
             // A slope rises across the ring too: allow for one of up to about 1 in 7.
             const float over = here.y - ground - max(0.005, ring * 0.12);
-            cover *= 1 - inside * smoothstep(0, 0.004, over);
+            // Well above the skater's own foot it is the skater, whatever is round it on screen: from a
+            // low camera the shoulders and hair have only things further up or the sky round them, and
+            // kept their snow (2026-11-11).
+            const float on_it = max(smoothstep(0, 0.004, over), smoothstep(0.3, 0.4, from.y));
+            cover *= 1 - inside * on_it;
         }
     }
     out_.cover = float2(cover, view_distance);

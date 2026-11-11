@@ -155,6 +155,7 @@ if(WIN32 AND DINGOSDK_FXC)
         COMMAND "${DINGOSDK_FXC}" /nologo /T vs_5_0 /E vs_main /Fo "${CMAKE_CURRENT_BINARY_DIR}/generated/world_cover_vs.cso" "${world_cover_hlsl_path}"
         COMMAND "${DINGOSDK_FXC}" /nologo /T ps_5_0 /E ps_main /Fo "${CMAKE_CURRENT_BINARY_DIR}/generated/world_cover_ps.cso" "${world_cover_hlsl_path}"
         COMMAND "${DINGOSDK_FXC}" /nologo /T ps_5_0 /E ps_depth /Fo "${CMAKE_CURRENT_BINARY_DIR}/generated/world_cover_depth.cso" "${world_cover_hlsl_path}"
+        COMMAND "${DINGOSDK_FXC}" /nologo /T ps_5_0 /E ps_measure /Fo "${CMAKE_CURRENT_BINARY_DIR}/generated/world_cover_measure.cso" "${world_cover_hlsl_path}"
         COMMAND "${CMAKE_COMMAND}" -E touch "${world_cover_checked}"
         DEPENDS "${world_cover_hlsl_path}"
         COMMENT "Checking the world cover's shader with fxc"

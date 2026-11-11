@@ -57,8 +57,8 @@ struct Clear {
 void set(const Settings& settings) noexcept;
 void clear() noexcept;
 // Client thread: up to three places kept clear for the next 300 ms (set them every tick); none ends it.
-// The first one also measures the depth's scale where its foot shows on screen, which the cylinders
-// need; while that foot is off screen the cover keeps nothing clear.
+// The first one also measures the depth's scale on the ground round its foot, which the cylinders and
+// the trails need; the scale is held from many frames, so they stay put while the foot is out of view.
 void keep_clear(std::vector<Clear> places) noexcept;
 // Client thread: a point on a trail through the cover (where a board goes): the cover is pressed away
 // along the trail, `width` wide, and fills back in over `fade` seconds. At most 256 points are kept, the

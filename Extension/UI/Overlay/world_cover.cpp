@@ -47,8 +47,21 @@ constexpr DXGI_FORMAT depth_copy_format = DXGI_FORMAT_R32_FLOAT;
 constexpr UINT views_each = 3;
 // Trails (add_trail): points kept, and the buffer each frame's are written to (world_cover.hlsl's t3:
 // two float4s of header, then two a point), one part of the upload buffer per command allocator.
-constexpr std::size_t most_trail = 256;
-constexpr UINT64 trail_slice = ((most_trail * 2 + 2) * 16 + 255) / 256 * 256;
+constexpr std::size_t most_trail = 256; // world_cover.hlsl's MOST_TRAIL
+// The cameras the measurement tries (world_cover.hlsl's ps_measure): the one read now and the two
+// read for the frames before. The camera is read on the CPU when the cover is drawn, and the picture
+// the GPU has is from a camera up to a frame or two apart; with the wrong one every point the cover
+// works out is off as the camera moves, and the trails and the skater's clear place slid (2026-11-11).
+constexpr std::size_t camera_candidates = 3;
+constexpr std::size_t camera_floats = 12; // right, up, back, eye
+constexpr UINT64 trail_slice = ((most_trail * 2 + 2 + camera_candidates * 4) * 16 + 255) / 256 * 256;
+// The measurements: one row a candidate camera, a column a point (ps_measure), read back by the CPU.
+constexpr UINT measure_columns = 32;
+constexpr UINT measure_pitch = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+constexpr UINT64 measure_slice = UINT64{measure_pitch} * camera_candidates;
+// Command allocators: the depth's copy and the cover each take one a frame, and the GPU runs frames
+// behind; with eight a frame now and then found none free and went without the snow (2026-11-11).
+constexpr std::size_t allocator_count = 16;
 
 using CreateViewFn = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, const void*, D3D12_CPU_DESCRIPTOR_HANDLE);
 using CopyDescriptorsFn = void(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, UINT,
@@ -162,8 +175,25 @@ struct Shared {
     ComPtr<ID3D12PipelineState> pipeline;
     DXGI_FORMAT pipeline_format{DXGI_FORMAT_UNKNOWN};
     // Eight: the GPU runs frames behind, and with three every other frame found none free (2026-11-10).
-    std::array<ComPtr<ID3D12CommandAllocator>, 8> allocators;
-    std::array<UINT64, 8> allocator_fence{};
+    std::array<ComPtr<ID3D12CommandAllocator>, allocator_count> allocators;
+    std::array<UINT64, allocator_count> allocator_fence{};
+    // The measurements (ps_measure): drawn into `measure`, copied to this allocator's part of the
+    // readback buffer, read when the allocator is next used (the GPU is done with it then).
+    ComPtr<ID3D12Resource> measure, measure_readback;
+    ComPtr<ID3D12PipelineState> measure_pipeline;
+    const std::uint8_t* measure_cpu{};
+    std::array<bool, allocator_count> measure_waiting{};
+    // The cameras of this and the last two frames, newest first, and how many are known.
+    std::array<std::array<float, camera_floats>, camera_candidates> cameras{};
+    std::size_t cameras_known{};
+    // How much each candidate's measurements scatter, on average lately; the one chosen; the near
+    // distance each recent frame measured with it, and the steady middle of them (0: none yet).
+    std::array<float, camera_candidates> scatter{};
+    bool scatter_known{};
+    std::size_t chosen_camera{};
+    std::deque<float> nears;
+    float held_near{};
+    std::uint64_t measured_frames{};
     std::size_t next_allocator{};
     ComPtr<ID3D12GraphicsCommandList> list;
     ComPtr<ID3D12Resource> trail_upload; // a slice a command allocator (trail_slice bytes each)
@@ -549,14 +579,16 @@ bool build_root(Shared& s) {
 }
 
 // The pass that copies the game's depth into ours (ps_depth): one target, the depth as a float.
-bool build_depth_pipeline(Shared& s) {
-    if (s.depth_pipeline) return true;
+// A pipeline of one target in `format`, with world_cover.hlsl's `entry` (ps_depth, ps_measure).
+bool build_single(Shared& s, const char* entry, DXGI_FORMAT format, ComPtr<ID3D12PipelineState>& pipeline) {
+    if (pipeline) return true;
     if (!build_root(s)) return false;
     const auto length = std::strlen(world_cover_hlsl);
     ComPtr<ID3DBlob> vertex, pixel, error;
     if (FAILED(D3DCompile(world_cover_hlsl, length, "world_cover", nullptr, nullptr, "vs_main", "vs_5_0", 0, 0, &vertex, &error)) || !vertex ||
-        FAILED(D3DCompile(world_cover_hlsl, length, "world_cover", nullptr, nullptr, "ps_depth", "ps_5_0", 0, 0, &pixel, &error)) || !pixel) {
-        say_failed(std::string("its depth shader did not compile") + (error ? std::string(": ") + static_cast<const char*>(error->GetBufferPointer()) : "."));
+        FAILED(D3DCompile(world_cover_hlsl, length, "world_cover", nullptr, nullptr, entry, "ps_5_0", 0, 0, &pixel, &error)) || !pixel) {
+        say_failed(std::string("its shader ") + entry + " did not compile" +
+                   (error ? std::string(": ") + static_cast<const char*>(error->GetBufferPointer()) : "."));
         return false;
     }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
@@ -570,14 +602,15 @@ bool build_depth_pipeline(Shared& s) {
     description.RasterizerState.DepthClipEnable = TRUE;
     description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     description.NumRenderTargets = 1;
-    description.RTVFormats[0] = depth_copy_format;
+    description.RTVFormats[0] = format;
     description.SampleDesc.Count = 1;
-    if (FAILED(s.device->CreateGraphicsPipelineState(&description, IID_PPV_ARGS(&s.depth_pipeline)))) {
-        say_failed("its depth pipeline was refused.");
+    if (FAILED(s.device->CreateGraphicsPipelineState(&description, IID_PPV_ARGS(&pipeline)))) {
+        say_failed(std::string("its pipeline for ") + entry + " was refused.");
         return false;
     }
     return true;
 }
+bool build_depth_pipeline(Shared& s) { return build_single(s, "ps_depth", depth_copy_format, s.depth_pipeline); }
 
 bool build_pipeline(Shared& s, DXGI_FORMAT format) {
     if (s.pipeline && s.pipeline_format == format) return true;
@@ -653,11 +686,36 @@ bool build_list(Shared& s) {
         views.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         D3D12_DESCRIPTOR_HEAP_DESC targets{};
         targets.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        targets.NumDescriptors = 4; // the picture, the two covers, our depth copy
+        targets.NumDescriptors = 5; // the picture, the two covers, our depth copy, the measurements
         if (FAILED(s.device->CreateDescriptorHeap(&views, IID_PPV_ARGS(&s.views))) || FAILED(s.device->CreateDescriptorHeap(&targets, IID_PPV_ARGS(&s.targets)))) {
             say_failed("no descriptor heaps.");
             return false;
         }
+        // The measurements' target, kept as a copy's source between frames, and where they are read.
+        D3D12_HEAP_PROPERTIES gpu{};
+        gpu.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC measured{};
+        measured.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        measured.Width = measure_columns;
+        measured.Height = static_cast<UINT>(camera_candidates);
+        measured.DepthOrArraySize = 1;
+        measured.MipLevels = 1;
+        measured.Format = DXGI_FORMAT_R32_FLOAT;
+        measured.SampleDesc.Count = 1;
+        measured.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_HEAP_PROPERTIES readback{};
+        readback.Type = D3D12_HEAP_TYPE_READBACK;
+        bytes.Width = measure_slice * s.allocators.size();
+        void* read{};
+        if (FAILED(s.device->CreateCommittedResource(&gpu, D3D12_HEAP_FLAG_NONE, &measured, D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr,
+                                                     IID_PPV_ARGS(&s.measure))) ||
+            FAILED(s.device->CreateCommittedResource(&readback, D3D12_HEAP_FLAG_NONE, &bytes, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                     IID_PPV_ARGS(&s.measure_readback))) ||
+            FAILED(s.measure_readback->Map(0, nullptr, &read)) || !read) {
+            say_failed("no buffer for its measurements.");
+            return false;
+        }
+        s.measure_cpu = static_cast<const std::uint8_t*>(read);
     }
     return true;
 }
@@ -811,6 +869,56 @@ bool snapshot_depth(Shared& s, ID3D12CommandQueue* queue, ExecuteFn original) {
 }
 
 // Records our list: the picture copied, then drawn back with the cover over it. Under the lock.
+// One frame's measurements (ps_measure), as read back: the camera whose points agree best over the
+// last few seconds is chosen, and the near distance held is the middle of what it measured over the
+// last 45 frames. The game's near distance stays the same for a camera, so one held is steadier than
+// any one frame's; a different camera's comes through within a second.
+void take_measurements(Shared& s, const std::uint8_t* rows) {
+    std::array<float, camera_candidates> middle{}, scatter{};
+    std::array<bool, camera_candidates> known{};
+    for (std::size_t c = 0; c < camera_candidates; ++c) {
+        const auto* row = reinterpret_cast<const float*>(rows + c * measure_pitch);
+        std::vector<float> values;
+        for (UINT i = 0; i < measure_columns; ++i)
+            if (std::isfinite(row[i]) && row[i] > 1e-5f && row[i] < 100.0f) values.push_back(row[i]);
+        if (values.size() < 6) continue;
+        const auto half = values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2);
+        std::nth_element(values.begin(), half, values.end());
+        middle[c] = *half;
+        for (auto& v : values) v = std::abs(v - middle[c]);
+        std::nth_element(values.begin(), half, values.end());
+        scatter[c] = *half / middle[c];
+        known[c] = true;
+    }
+    if (!known[0]) return;
+    for (std::size_t c = 0; c < camera_candidates; ++c) {
+        const float x = known[c] ? scatter[c] : 1.0f;
+        s.scatter[c] = s.scatter_known ? s.scatter[c] * 0.97f + x * 0.03f : x;
+    }
+    s.scatter_known = true;
+    // Another camera only when it is clearly better: they agree while the camera is still.
+    std::size_t best = s.chosen_camera;
+    for (std::size_t c = 0; c < camera_candidates; ++c)
+        if (s.scatter[c] < s.scatter[best] * 0.8f) best = c;
+    if (best != s.chosen_camera) {
+        s.chosen_camera = best;
+        s.nears.clear();
+        logging::printf(logging::Level::info, logging::Channel::graphics, "World cover: the camera %zu frame(s) back fits the picture best (scatter %.3f, %.3f, %.3f).",
+                        best, s.scatter[0], s.scatter[1], s.scatter[2]);
+    }
+    if (!known[s.chosen_camera]) return;
+    s.nears.push_back(middle[s.chosen_camera]);
+    while (s.nears.size() > 45) s.nears.pop_front();
+    std::vector<float> sorted(s.nears.begin(), s.nears.end());
+    const auto half = sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2);
+    std::nth_element(sorted.begin(), half, sorted.end());
+    // Only once a few frames agree on it.
+    s.held_near = sorted.size() >= 5 ? *half : s.held_near;
+    if (++s.measured_frames == 300)
+        logging::printf(logging::Level::info, logging::Channel::graphics, "World cover: near distance %.4f, from the camera %zu frame(s) back.",
+                        s.held_near, s.chosen_camera);
+}
+
 bool record_cover(Shared& s) {
     s.why = "nothing to draw into";
     if (s.failed || !s.colour || !s.main_depth) return false;
@@ -845,7 +953,9 @@ bool record_cover(Shared& s) {
         s.why = "no camera";
         return false;
     }
-    if (!build_resources(s, colour_desc) || !build_pipeline(s, s.colour_format)) return false;
+    if (!build_resources(s, colour_desc) || !build_pipeline(s, s.colour_format) ||
+        !build_single(s, "ps_measure", DXGI_FORMAT_R32_FLOAT, s.measure_pipeline))
+        return false;
     // What was replaced and the GPU has finished with goes now.
     if (s.fence) {
         const UINT64 done = s.fence->GetCompletedValue();
@@ -857,9 +967,20 @@ bool record_cover(Shared& s) {
         s.why = "no command allocator free";
         return false;
     }
+    // What this allocator's last list measured: the GPU is done with it.
+    if (s.measure_waiting[at] && s.measure_cpu) take_measurements(s, s.measure_cpu + at * measure_slice);
+    s.measure_waiting[at] = false;
     s.why = "recording failed";
     if (FAILED(s.allocators[at]->Reset()) || FAILED(s.list->Reset(s.allocators[at].Get(), nullptr))) return false;
     s.next_allocator = (at + 1) % s.allocators.size();
+    // This frame's camera, newest first, and the one the measurements chose to draw with.
+    {
+        const auto& m = projector->m;
+        for (std::size_t c = camera_candidates - 1; c > 0; --c) s.cameras[c] = s.cameras[c - 1];
+        s.cameras[0] = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10], m[12], m[13], m[14]};
+        s.cameras_known = std::min(s.cameras_known + 1, camera_candidates);
+    }
+    const auto& camera = s.cameras[std::min(s.chosen_camera, s.cameras_known - 1)];
 
     Settings settings;
     std::vector<Clear> clear;
@@ -885,6 +1006,14 @@ bool record_cover(Shared& s) {
         }
         out[0] = static_cast<float>(count), out[1] = box[0], out[2] = box[1], out[3] = box[2];
         out[4] = box[3], out[5] = box[4], out[6] = box[5], out[7] = 0;
+        // The candidate cameras for ps_measure, after the most points there can be.
+        for (std::size_t c = 0; c < camera_candidates; ++c) {
+            const auto& from = s.cameras[std::min(c, s.cameras_known - 1)];
+            float* const to = out + (most_trail * 2 + 2 + c * 4) * 4;
+            for (std::size_t v = 0; v < 4; ++v) {
+                to[v * 4] = from[v * 3], to[v * 4 + 1] = from[v * 3 + 1], to[v * 4 + 2] = from[v * 3 + 2], to[v * 4 + 3] = 0;
+            }
+        }
     }
     // Views: the picture's copy as the target's format reads it, and the game's depth as it is.
     const UINT view_step = s.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -934,13 +1063,13 @@ bool record_cover(Shared& s) {
     transition(list, s.colour, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
     transition(list, write_cover, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-    const auto& m = projector->m;
+    const auto& m = camera; // right, up, back, eye: three a row
     const float width = static_cast<float>(colour_desc.Width), height = static_cast<float>(colour_desc.Height);
     std::array<float, constant_count> constants{
         m[0], m[1], m[2], projector->focal,
-        m[4], m[5], m[6], width,
-        m[8], m[9], m[10], height,
-        m[12], m[13], m[14], 0.1f, // the near distance: it scales distances, not directions; only the noise's size depends on it
+        m[3], m[4], m[5], width,
+        m[6], m[7], m[8], height,
+        m[9], m[10], m[11], s.held_near, // the near distance measured (0: not yet, the shader measures its own)
         settings.colour[0], settings.colour[1], settings.colour[2], settings.amount,
         settings.facing, settings.softness, settings.brightness, settings.breakup,
         settings.sparkle, static_cast<float>(now % 3600000) / 1000.0f, settings.snowfall, settings.fall_speed,
@@ -957,7 +1086,7 @@ bool record_cover(Shared& s) {
         constants[34 + i * 4] = clear[i].foot[2];
         constants[35 + i * 4] = clear[i].radius;
     }
-    s.last_camera = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10], m[12], m[13], m[14]};
+    s.last_camera = camera;
     ID3D12DescriptorHeap* heaps[] = {s.views.Get()};
     list->SetDescriptorHeaps(1, heaps);
     list->SetGraphicsRootSignature(s.root.Get());
@@ -974,6 +1103,36 @@ bool record_cover(Shared& s) {
     list->OMSetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), FALSE, nullptr);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     list->DrawInstanced(3, 1, 0, 0);
+
+    // The measurements, with the same constants and views, copied out for the CPU (take_measurements).
+    {
+        auto measure_target = s.targets->GetCPUDescriptorHandleForHeapStart();
+        measure_target.ptr += SIZE_T{target_step} * 4;
+        D3D12_RENDER_TARGET_VIEW_DESC measure_view{};
+        measure_view.Format = DXGI_FORMAT_R32_FLOAT;
+        measure_view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        original_rtv.load()(s.device, s.measure.Get(), &measure_view, measure_target);
+        transition(list, s.measure.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        list->SetPipelineState(s.measure_pipeline.Get());
+        const D3D12_VIEWPORT small{0, 0, static_cast<float>(measure_columns), static_cast<float>(camera_candidates), 0, 1};
+        const D3D12_RECT small_scissor{0, 0, static_cast<LONG>(measure_columns), static_cast<LONG>(camera_candidates)};
+        list->RSSetViewports(1, &small);
+        list->RSSetScissorRects(1, &small_scissor);
+        list->OMSetRenderTargets(1, &measure_target, FALSE, nullptr);
+        list->DrawInstanced(3, 1, 0, 0);
+        transition(list, s.measure.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION to{};
+        to.pResource = s.measure_readback.Get();
+        to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        to.PlacedFootprint.Offset = at * measure_slice;
+        to.PlacedFootprint.Footprint = {DXGI_FORMAT_R32_FLOAT, measure_columns, static_cast<UINT>(camera_candidates), 1, measure_pitch};
+        D3D12_TEXTURE_COPY_LOCATION from{};
+        from.pResource = s.measure.Get();
+        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        from.SubresourceIndex = 0;
+        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        s.measure_waiting[at] = true;
+    }
 
     transition(list, s.colour, D3D12_RESOURCE_STATE_RENDER_TARGET, before);
     transition(list, s.picture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1213,6 +1372,17 @@ void release() noexcept {
         s.retiring.clear(); // the overlay waits for the GPU before it tears down
         s.depth_copy.Reset();
         s.depth_pipeline.Reset();
+        s.measure.Reset();
+        s.measure_readback.Reset();
+        s.measure_cpu = nullptr;
+        s.measure_pipeline.Reset();
+        s.measure_waiting = {};
+        s.cameras_known = 0;
+        s.scatter_known = false;
+        s.chosen_camera = 0;
+        s.nears.clear();
+        s.held_near = 0;
+        s.measured_frames = 0;
         s.depth_copied_frame = ~std::uint64_t{0};
         s.chosen_format = DXGI_FORMAT_UNKNOWN;
         s.last_drawn_frame = ~std::uint64_t{0};
