@@ -276,6 +276,8 @@ void prepare_audio_capture(Address base, const NativeFrame &local) noexcept {
         s.next_local_audit = now + 1000000;
     } catch (const std::exception &e) {
         std::lock_guard lock(s.mutex);
+        if (s.capture_issue != e.what())
+            logging::log(logging::Level::warning, logging::Channel::runtime, "Skater sound: the local skater's sound is not followed: {}", e.what());
         s.capture_issue = e.what();
     }
 }
