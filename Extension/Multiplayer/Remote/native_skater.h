@@ -27,10 +27,6 @@ std::uint64_t remote_board_pose_updates() noexcept;
 NativeAnimationStats remote_animation_stats() noexcept;
 std::uintptr_t remote_skater_entity() noexcept;
 std::uintptr_t remote_board_entity() noexcept;
-// An entity's place in the world, as the pose capture reads a skater's or a board's root (its transform
-// collection's matrix); empty when it cannot be read. Any thread: it only reads, and a read that fails
-// is caught.
-std::optional<Transform> entity_transform(std::uintptr_t entity) noexcept;
 // Changes whenever the current slot's actor is created, removed or destroyed.
 std::uint64_t remote_skater_generation() noexcept;
 // Client thread. Installs the shared animation/destruction hooks without
