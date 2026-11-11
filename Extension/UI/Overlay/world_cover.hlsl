@@ -220,44 +220,75 @@ float trail_at(float3 here) {
     return pressed;
 }
 
-// Snow falling: flakes on a few shells round the camera, each nearer one bigger and faster. Each flake
-// has a cell of its own on its shell, by direction from the camera (round it and up it), so it stays put
-// in the world as the camera turns; it slides down its shell as time goes, sways and drifts with the
-// wind, and is drawn out along its fall as a moving flake looks. Hidden behind whatever is nearer
-// than its shell. Flakes as blobs in a 3D grid were cut by the shell and showed only for the moment they
-// crossed it: a white dot, then nothing (2026-11-11).
+// Snow falling, in the world: a grid of cells over the world that falls and drifts with the wind, each
+// cell holding one flake or none; every pixel steps along its ray through the cells it crosses, as far
+// as the scene (nearer flakes only), and draws the flakes it passes close to. So they keep their places
+// in the world: running forward, they come at the camera and pass it. Each is drawn out along how far
+// it moved against the camera over a frame (its fall, the wind, the camera's own move), the streak a
+// moving flake makes. Flakes placed by direction alone, round the camera, moved with it and looked like
+// a picture laid over the screen (2026-11-11).
+float flake_layer(float3 dir, float limit, float cell, float chance, float radius, float salt, float3 shift, float3 streak, float seconds) {
+    const float3 o = (eye_near.xyz + shift) / cell; // the camera, in this layer's cells
+    float3 c = floor(o);
+    const float3 way = float3(dir.x >= 0 ? 1 : -1, dir.y >= 0 ? 1 : -1, dir.z >= 0 ? 1 : -1);
+    const float3 inv = 1.0 / max(abs(dir), 1e-5);
+    float3 next = (c + max(way, 0) - o) * way * inv; // along the ray (in cells) to each axis's next wall
+    const float streak_length = length(streak);
+    const float focal = right_focal.w;
+    float t = 0, seen = 0;
+    [loop] for (int i = 0; i < 36; ++i) {
+        if (t * cell > limit) break;
+        const float3 seed = hash3(c + salt);
+        if (seed.x < chance) {
+            float3 centre = c + 0.2 + seed.yzx * 0.6;
+            centre.xz += float2(sin(seconds * (0.6 + seed.y) + seed.z * 6.2831853), cos(seconds * (0.5 + seed.z) + seed.y * 6.2831853)) * (0.06 / cell);
+            const float3 a = centre * cell - shift - eye_near.xyz; // the flake against the camera, in metres
+            // The nearest the ray comes to the flake's streak (a to a + streak).
+            const float3 d = streak;
+            const float dd = dot(d, d);
+            const float rd = dot(dir, d);
+            const float ra = dot(dir, a), da = dot(d, a);
+            const float denominator = dd - rd * rd;
+            float u = denominator > 1e-8 ? saturate((ra * rd - da) / denominator) : 0;
+            const float3 on = a + d * u;
+            const float along = dot(on, dir);
+            if (along > 0.3 && along < limit) {
+                const float off = length(on - dir * along) * focal / along;   // pixels from the ray
+                const float size = radius * focal / along;                   // the flake's radius in pixels
+                const float shown = max(size, 0.9);                           // at least about a pixel, fainter
+                float touch = 1 - smoothstep(shown * 0.4, shown + 0.6, off);
+                touch *= min(size / shown, 1.0) * (1.0 / (1.0 + streak_length * focal / along / (4.0 * shown)));
+                touch *= 1 - smoothstep(limit * 0.7, limit, along);           // fading out with distance
+                seen = max(seen, touch);
+            }
+        }
+        // On to the next cell along the ray.
+        if (next.x < next.y && next.x < next.z) { t = next.x; next.x += inv.x; c.x += way.x; }
+        else if (next.y < next.z) { t = next.y; next.y += inv.y; c.y += way.y; }
+        else { t = next.z; next.z += inv.z; c.z += way.z; }
+    }
+    return seen;
+}
+
 float3 snowfall(float3 colour, int2 p, float scene_distance, float exposure) {
     const float amount = extra.z;
     if (amount <= 0) return colour;
-    const float3 ray = normalize(ray_of(p));
+    const float3 dir = normalize(ray_of(p));
     const float seconds = extra.y;
-    const float round_way = atan2(ray.x, ray.z) / 6.2831853; // 0..1 round the camera
-    const float up_way = asin(clamp(ray.y, -1, 1));            // radians up
-    const float squeeze = max(cos(up_way), 0.2);               // round-the-camera cells are narrower up high
-    float flakes = 0;
-    [unroll] for (int k = 0; k < 5; ++k) {
-        const float shell = 1.5 * pow(1.7, k);               // metres from the camera: 1.5, 2.6, 4.3, 7.4, 12.5
-        if (shell > scene_distance) break;
-        const float cells = 26.0 * pow(1.55, k);             // flakes across a radian: further shells, smaller flakes
-        const float around = max(round(6.2831853 * cells), 1.0);
-        const float fall = 1.1 * max(extra.w, 0.05) / shell;  // radians a second down this shell (about 1.1 m/s)
-        const float drift = 0.25 / shell;                     // and across it, with the wind
-        const float2 q = float2(round_way * around + drift * cells * seconds, (up_way + fall * seconds) * cells);
-        const float2 cell = floor(q);
-        const float2 wrapped = float2(cell.x - around * floor(cell.x / around), cell.y);
-        const float3 seed = hash3(float3(wrapped, k * 17.0 + 0.5));
-        if (seed.x > amount * 0.55) continue;                // how many cells hold a flake
-        float2 centre = cell + 0.3 + seed.yz * 0.4;
-        centre.x += sin(seconds * (0.7 + seed.y * 0.8) + seed.z * 6.2831853) * 0.15; // its own sway
-        float2 off = q - centre;
-        off.x *= squeeze;
-        // Drawn out along its fall by about how far it moves in a frame, and a little more for the near ones.
-        const float stretch = 1.0 + min(fall * cells / 60.0 * 3.0, 3.0);
-        off.y /= stretch;
-        const float size = (0.07 + seed.y * 0.05) * (1.15 - k * 0.08);
-        const float touch = 1 - smoothstep(size * 0.3, size, length(off));
-        flakes = max(flakes, touch * (1 - k * 0.12) * (0.75 + 0.25 / stretch));
-    }
+    const float fall = 1.1 * max(extra.w, 0.05);          // metres a second down (about 1.1 at the usual speed)
+    const float3 wind = float3(0.35, 0, 0.2) * max(extra.w, 0.3);
+    const float3 velocity = float3(wind.x, -fall, wind.z);
+    // The grid moves against the flakes: a flake fixed in the grid falls and drifts in the world.
+    const float3 shift = -velocity * seconds;
+    // Its streak over a frame, against the camera: back where it was, seen from where the camera was.
+    float3 moved = -velocity / 60.0;
+    if (last_right.w > 0) moved += eye_near.xyz - last_eye.xyz;
+    const float moved_length = length(moved);
+    if (moved_length > 0.4) moved *= 0.4 / moved_length;    // a jump (a cut, a respawn) is not a streak
+    const float near_limit = min(scene_distance, 7.0);
+    const float far_limit = min(scene_distance, 22.0);
+    float flakes = flake_layer(dir, near_limit, 0.45, amount * 0.45, 0.006, 0.5, shift, moved, seconds);
+    flakes = max(flakes, flake_layer(dir, far_limit, 1.3, amount * 0.6, 0.012, 17.5, shift, moved, seconds) * 0.8);
     const float3 white = colour_amount.rgb * exposure * 1.6;
     return lerp(colour, white, saturate(flakes) * 0.85);
 }
