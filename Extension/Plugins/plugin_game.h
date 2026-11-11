@@ -1071,8 +1071,10 @@ public:
     };
     // Empty when the mod declares no variants.
     virtual std::optional<VariantState> variants(std::string_view /*plugin*/, const std::filesystem::path& /*package*/) { return std::nullopt; }
-    // The variant saved as the mod's choice, the mods applied again and the level loaded again with it.
-    virtual std::string choose_variant(std::string_view /*plugin*/, const std::filesystem::path& /*package*/, std::string_view /*variant*/) {
+    // The variant saved as the mod's choice, and (now) the mods applied again and the level loaded
+    // again with it; without now, it only waits for the next launch.
+    virtual std::string choose_variant(std::string_view /*plugin*/, const std::filesystem::path& /*package*/, std::string_view /*variant*/,
+                                       bool /*now*/ = true) {
         return unavailable;
     }
     // ---- the skater's physics -----------------------------------------------------------------------

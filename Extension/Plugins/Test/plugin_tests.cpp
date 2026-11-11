@@ -408,6 +408,11 @@ struct FakeGame final : Game {
     std::optional<MarkerEvents> marker_events(std::string_view plugin) override {
         return std::exchange(marker_feed[std::string(plugin)], {});
     }
+    std::vector<std::pair<std::string, bool>> chosen_variants; // each choice, and whether it went in now
+    std::string choose_variant(std::string_view, const std::filesystem::path&, std::string_view variant, bool now) override {
+        chosen_variants.emplace_back(std::string(variant), now);
+        return {};
+    }
     std::optional<std::uint32_t> state;
     std::uint64_t wipe{};
     std::vector<std::string> calls;
@@ -1495,6 +1500,20 @@ Candidate script(const std::string& id, const std::string& main, const std::stri
 }
 
 void running(const Host& host, std::string_view id, const TestEnvironment& environment);
+
+void a_variant_can_wait_for_the_next_launch() {
+    TestEnvironment environment;
+    Host host(environment, Side::client);
+    host.apply({script("variant-chooser", R"(
+        assert(reskate.package.choose("snowskate"))
+        assert(reskate.package.choose("standard", {now = false}))
+        assert(reskate.package.choose("standard", {now = true}))
+        assert(not pcall(reskate.package.choose, "standard", 7), "options are a table")
+    )", R"("variants")")});
+    running(host, "variant-chooser", environment);
+    const std::vector<std::pair<std::string, bool>> expected{{"snowskate", true}, {"standard", false}, {"standard", true}};
+    check(environment.fake.chosen_variants == expected, "choose keeps a variant for the next launch only when now is false");
+}
 
 void traffic_vehicles_are_permissioned_bounded_and_released() {
     using traffic_vehicles::Quaternion;
@@ -7202,6 +7221,7 @@ int main() {
         scratch = std::filesystem::temp_directory_path() / "reskate-plugin-tests";
         std::filesystem::remove_all(scratch);
         run(a_manifest_says_what_a_plugin_is);
+        run(a_variant_can_wait_for_the_next_launch);
         run(ui_value_reservations_enforce_limits_and_collisions);
         run(plugins_publish_only_their_own_ui_values);
         run(plugin_approval_follows_the_plugins_own_files);

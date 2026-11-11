@@ -664,15 +664,15 @@ public:
         if (!kept.declared) return std::nullopt;
         return VariantState{kept.installed, mods::chosen_variant(plugin), mods::variant_in_play(plugin)};
     }
-    std::string choose_variant(std::string_view plugin, const std::filesystem::path& package, std::string_view variant) override {
+    std::string choose_variant(std::string_view plugin, const std::filesystem::path& package, std::string_view variant, bool now) override {
         const auto state = variants(plugin, package);
         if (!state) return "its mod declares no variants";
         std::string name(variant);
         for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (std::find(state->installed.begin(), state->installed.end(), name) == state->installed.end()) return "its mod has no variant " + name;
-        if (live_mods::busy()) return "the mods are being applied";
+        if (now && live_mods::busy()) return "the mods are being applied";
         if (!mods::save_variant(plugin, name)) return "the choice could not be saved";
-        if (name != state->in_play) (void)live_mods::apply(true);
+        if (now && name != state->in_play) (void)live_mods::apply(true);
         return {};
     }
     // ---- outfit --------------------------------------------------------------------------------------
