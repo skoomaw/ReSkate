@@ -331,7 +331,7 @@ public:
     // screen only, until ended; empty ends it. One plugin at a time.
     struct WorldCover {
         std::array<float, 3> colour{0.92f, 0.95f, 1.0f};
-        float amount{1}, facing{0.55f}, softness{0.15f}, brightness{1.6f}, breakup{0.35f}, sparkle{0}, snowfall{0};
+        float amount{1}, facing{0.55f}, softness{0.15f}, brightness{1.6f}, breakup{0.35f}, sparkle{0}, snowfall{0}, fall_speed{1};
     };
     virtual std::string world_cover(std::string_view /*plugin*/, std::optional<WorldCover>) { return unavailable; }
     // Up to three places kept clear of that cover for the next 300 ms (world_cover::keep_clear): an

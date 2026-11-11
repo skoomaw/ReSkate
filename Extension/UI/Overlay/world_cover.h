@@ -42,6 +42,7 @@ struct Settings {
     float breakup{0.35f};   // 0..1: how patchy its edge is (world-space noise)
     float sparkle{0.0f};    // 0..1: glints, as fresh snow has
     float snowfall{0.0f};   // 0..1: snow falling in front of the world, none to heavy
+    float fall_speed{1.0f}; // 0.1..4: how fast it falls, 1 about 1.1 m/s
 };
 
 // A place kept clear of the cover: an upright cylinder `radius` wide standing on `foot` (the world),

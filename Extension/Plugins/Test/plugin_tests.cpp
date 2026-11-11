@@ -4677,6 +4677,7 @@ void plugins_cover_the_world() {
         assert(reskate.effects.cover({colour = {r = 0.9, g = 0.95, b = 1}, amount = 0.8, facing = 0.6, softness = 0.1, brightness = 2,
             breakup = 0.5, sparkle = 0.25, snowfall = 0.6}))
         assert(not pcall(reskate.effects.cover, {snowfall = 1.5}), "a snowfall is 0 to 1")
+        assert(not pcall(reskate.effects.cover, {fall_speed = 9}), "a fall speed is 0.1 to 4")
         assert(not pcall(reskate.effects.cover, {amount = 2}), "an amount is 0 to 1")
         assert(not pcall(reskate.effects.cover, {facing = -0.1}), "a facing is 0 to 1")
         assert(not pcall(reskate.effects.cover, {brightness = 9}), "a brightness is 0.25 to 4")

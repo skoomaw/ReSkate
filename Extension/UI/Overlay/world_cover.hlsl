@@ -1,7 +1,7 @@
 // A cover over the world's upward-facing surfaces (world_cover.cpp, reskate.effects.cover), drawn into
 // the finished scene just before the game puts it on the screen with its UI, and snow falling in front
 // of it. One full-screen triangle; t0 is a copy of that picture, t1 the game's own depth for it
-// (reversed: 1 near, 0 far), t2 the cover as it was last frame (how much, and how far away), which
+// (reversed: 1 near, 0 far: our copy of it, which ps_depth takes), t2 the cover as it was last frame (how much, and how far away), which
 // this pass writes again to its second target, and t3 the trails through the cover (a buffer).
 
 cbuffer constants : register(b0) {
@@ -11,7 +11,7 @@ cbuffer constants : register(b0) {
     float4 eye_near;      // where it is, and the near distance the reversed depth is over when not measured
     float4 colour_amount; // the cover's colour, and how much of a covered surface it hides
     float4 shape;         // facing, softness, brightness, breakup
-    float4 extra;         // sparkle, seconds (for the falling snow), how much snow falls (0 to 1), unused
+    float4 extra;         // sparkle, seconds (for the falling snow), how much snow falls (0 to 1), how fast (1 the usual)
     float4 clear_info;    // how many places are kept clear (0 to 3), then each one's height above its foot
     float4 clears[3];     // each: its foot in the world, and its radius
     float4 last_right;    // last frame's camera (as this frame's above), and whether last frame's cover is there
@@ -32,6 +32,9 @@ struct Output {
     float4 colour : SV_Target0;
     float2 cover : SV_Target1; // how much cover, and the distance along the view it is at
 };
+
+// Our copy of the game's depth (world_cover.cpp, snapshot_depth): t1 is the game's own here.
+float ps_depth(Vertex input) : SV_Target { return depth.Load(int3(int2(input.position.xy), 0)); }
 
 Vertex vs_main(uint id : SV_VertexID) {
     Vertex v;
@@ -143,7 +146,7 @@ float3 snowfall(float3 colour, int2 p, float scene_distance, float exposure) {
         const float shell = 1.5 * pow(1.7, k);               // metres from the camera: 1.5, 2.6, 4.3, 7.4, 12.5
         if (shell > scene_distance) break;
         const float cells = 26.0 * pow(1.55, k);             // flakes across a radian: further shells, smaller flakes
-        const float fall = 1.1 / shell * cells;              // about 1.1 m/s down, in this shell's cells
+        const float fall = 1.1 * max(extra.w, 0.05) / shell * cells; // about 1.1 m/s down at the usual speed, in this shell's cells
         const float3 drift = float3(0.35, 0, 0.2) / shell * cells;
         float3 q = ray * cells + float3(0, fall, 0) * seconds + drift * seconds;
         q.x += sin(seconds * 0.9 + q.y * 0.35) * 0.25;       // a little sway
@@ -266,8 +269,8 @@ Output ps_main(Vertex input) {
                 ring = max(ring, length(point_there.xz - here.xz));
             }
             // A slope rises across the ring too: allow for one of up to about 1 in 7.
-            const float over = here.y - ground - max(0.01, ring * 0.15);
-            cover *= 1 - inside * smoothstep(0, 0.01, over);
+            const float over = here.y - ground - max(0.005, ring * 0.12);
+            cover *= 1 - inside * smoothstep(0, 0.004, over);
         }
     }
     out_.cover = float2(cover, view_distance);
