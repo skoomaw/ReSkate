@@ -108,6 +108,8 @@ Shared& shared() {
     return *value;
 }
 std::atomic<std::uintptr_t> base_now{}, holder_now{};
+// The local board's entity: its place in the world is the root the rig hangs on (deck_in_world).
+std::atomic<std::uintptr_t> board_entity_now{};
 std::atomic<bool> any{};
 // A plugin has used reskate.board, so the board's drawing is to be hooked (tick).
 std::atomic<bool> used{};
@@ -336,14 +338,19 @@ std::optional<Placed> deck_in_world() {
     return s.deck;
 }
 void tick(std::uintptr_t base, std::uintptr_t component) noexcept {
-    std::uintptr_t holder{};
+    std::uintptr_t holder{}, board_entity{};
     try {
         if (component && base) {
             const auto collection = read_value<std::uintptr_t>(component + 0x18).value_or(0);
             const auto entity = collection ? read_value<std::uintptr_t>(collection).value_or(0) : 0;
-            if (entity) holder = multiplayer::read_native_board(peek, base, entity).holder;
+            if (entity) {
+                const auto board = multiplayer::read_native_board(peek, base, entity);
+                holder = board.holder;
+                board_entity = board.entity;
+            }
         }
     } catch (...) {}
+    board_entity_now.store(board_entity, std::memory_order_release);
     base_now.store(base, std::memory_order_release);
     holder_now.store(holder, std::memory_order_release);
     static bool sending{};
@@ -479,17 +486,23 @@ void on_render_pose(std::uintptr_t animation_interface) noexcept {
                 (void)store(bone_at(buffer, b), rotation, at);
             }
         }
-        // The deck in the world as drawn now, after the writes above: bone 1 in the world, then 2 and 3.
+        // The deck in the world as drawn now, after the writes above. The rig hangs on the board entity's
+        // place in the world, each bone on the one before as far as the deck: the reference (0), the
+        // board's place (1), the mount (2) and the deck (3) (skater_bone_parents.h board_bone_parents).
+        // Taking bone 1 for the world left out the entity's own place, and the tread drawn there was
+        // never on the deck (2026-11-11).
         std::array<Lane, 4> after{};
-        if (peek(buffer, after.data(), sizeof(after))) {
-            const auto bone_rotation = [&](int b) { return normalised(Quat{after[b].rotation}); };
-            const auto bone_at_position = [&](int b) { return Vec3{after[b].position[0], after[b].position[1], after[b].position[2]}; };
-            const Quat place = bone_rotation(1), mount = bone_rotation(2);
-            const Vec3 mount_at = add(bone_at_position(1), rotate(place, bone_at_position(2)));
-            const Quat mount_world = normalised(multiply(place, mount));
+        const auto root = multiplayer::entity_transform(board_entity_now.load(std::memory_order_acquire));
+        if (root && peek(buffer, after.data(), sizeof(after))) {
+            Quat rotation = normalised(Quat{root->rotation});
+            Vec3 position = root->position;
+            for (int b = 0; b <= 3; ++b) {
+                position = add(position, rotate(rotation, Vec3{after[b].position[0], after[b].position[1], after[b].position[2]}));
+                rotation = normalised(multiply(rotation, normalised(Quat{after[b].rotation})));
+            }
             Placed deck;
-            deck.rotation = normalised(multiply(mount_world, bone_rotation(3)));
-            deck.position = add(mount_at, rotate(mount_world, bone_at_position(3)));
+            deck.rotation = rotation;
+            deck.position = position;
             deck.at_ms = GetTickCount64();
             if (std::all_of(deck.position.begin(), deck.position.end(), [](float v) { return std::isfinite(v) && std::abs(v) < 1e6f; })) s.deck = deck;
         }

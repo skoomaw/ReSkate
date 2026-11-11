@@ -1010,11 +1010,26 @@ bool record_cover(Shared& s) {
             float* const to = out + (most_trail * 2 + 2 + camera_candidates * 4) * 4;
             std::fill(to, to + tread_floats4 * 4, 0.0f);
             const auto deck = tread ? board_pose::deck_in_world() : std::nullopt;
+            // Now and then, where the deck is against the skater: a tread far from them is drawn nowhere.
+            if (tread && s.frame % 3600 == 300) {
+                if (!deck) logging::write(logging::Level::info, logging::Channel::graphics, "World cover: a tread is asked for, and no deck has been drawn.");
+                else {
+                    float apart = -1;
+                    if (!clear.empty()) {
+                        const float dx = deck->position[0] - clear[0].foot[0], dy = deck->position[1] - clear[0].foot[1], dz = deck->position[2] - clear[0].foot[2];
+                        apart = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    }
+                    logging::printf(logging::Level::info, logging::Channel::graphics,
+                                    "World cover: the tread's deck is at (%.2f, %.2f, %.2f), %.2f m from the skater's place, drawn %llu ms ago.",
+                                    deck->position[0], deck->position[1], deck->position[2], apart,
+                                    static_cast<unsigned long long>(now - deck->at_ms));
+                }
+            }
             if (tread && deck && now - deck->at_ms < 250) {
                 to[0] = deck->rotation[0], to[1] = deck->rotation[1], to[2] = deck->rotation[2], to[3] = deck->rotation[3];
                 to[4] = deck->position[0], to[5] = deck->position[1], to[6] = deck->position[2], to[7] = 1;
                 to[8] = tread->colour[0], to[9] = tread->colour[1], to[10] = tread->colour[2], to[11] = tread->opacity;
-                to[12] = tread->width * 0.5f, to[13] = tread->length * 0.5f, to[14] = tread->height, to[15] = 0.008f;
+                to[12] = tread->width * 0.5f, to[13] = tread->length * 0.5f, to[14] = tread->height, to[15] = 0.03f; // a scale a little off moves points along the view
                 to[16] = tread->spacing, to[17] = tread->ridge;
             }
         }

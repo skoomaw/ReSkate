@@ -611,6 +611,14 @@ std::uintptr_t remote_skater_entity() noexcept {
 std::uintptr_t remote_board_entity() noexcept {
     return watched().board[peer_slot].load(std::memory_order_acquire);
 }
+std::optional<Transform> entity_transform(std::uintptr_t entity) noexcept {
+    if (!entity) return std::nullopt;
+    try {
+        return from_matrix(root_matrix(entity));
+    } catch (...) {
+        return std::nullopt;
+    }
+}
 std::uint64_t remote_skater_generation() noexcept {
     return remote().generation.load(std::memory_order_acquire);
 }
