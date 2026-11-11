@@ -123,6 +123,34 @@ float noise(float2 p) {
 
 float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
+// The middle brightness of 16 samples of the picture round p, on the same plane as `here` (within
+// `flat` metres of it along `normal`), reaching up to `reach` pixels, turned by `spin`: `fallback`
+// when fewer than four are on the plane.
+float median_light(int2 p, float3 here, float3 normal, float near_distance, float reach, float flat, float spin, float fallback) {
+    const int2 size = int2(up_width.w, back_height.w);
+    float v[16];
+    int found = 0;
+    [unroll] for (int i = 0; i < 16; ++i) {
+        const float angle = spin + i * 2.3999632; // golden angle: spread evenly, no two in line
+        const float radius = reach * sqrt((i + 0.5) / 16.0);
+        const int2 at = clamp(p + int2(float2(cos(angle), sin(angle)) * radius), int2(0, 0), size - 1);
+        const float there = depth_at(at);
+        const bool same = there > 0 && abs(dot(world_at(at, there, near_distance) - here, normal)) <= flat;
+        v[i] = same ? luminance(scene.Load(int3(at, 0)).rgb) : -1.0;
+        found += same ? 1 : 0;
+    }
+    if (found < 4) return fallback;
+    // Sorted (16 is few): those off the plane (-1) first, then the middle of the rest.
+    [unroll] for (int a = 1; a < 16; ++a) {
+        [unroll] for (int b = a; b > 0; --b) {
+            const float lo = min(v[b - 1], v[b]), hi = max(v[b - 1], v[b]);
+            v[b - 1] = lo;
+            v[b] = hi;
+        }
+    }
+    return v[16 - found + found / 2];
+}
+
 // A tread over the underside of the local skater's deck (world_cover.cpp: five float4s after the
 // cameras): the deck's rotation, its place (w: 1 when on), the tread's colour and opacity, its half
 // width, half length, height from the deck's bone and how thick a slice of the deck counts as its
@@ -351,36 +379,19 @@ Output ps_main(Vertex input) {
 
     // Lit as what it covers is lit, without its colour: so a shadow on the ground is a shadow on the
     // snow, and the game's exposure holds for both. Not from the pixel alone, or the ground's own
-    // pattern (paving joints, cracks) shows through as grey: the brightest of a few close samples on the
-    // same plane as this pixel, so dark joints vanish under the snow. Close, and the same plane only: a
-    // wide ring copied the skater onto the snow round them, and samples only as deep as this pixel took
-    // in the deck lying a centimetre over the ground and copied its white rim round it (2026-11-11).
-    const int2 size = int2(up_width.w, back_height.w);
-    const float reach = max(back_height.w * 0.006, 2.0);
-    const float flat = max(0.004, view_distance * 0.002);
-    float light = luminance(under.rgb);
-    const float base = light;
-    [unroll] for (int i = 0; i < 12; ++i) {
-        const float angle = i * 0.5235988 + (i & 1) * 0.26;
-        const float2 way = float2(cos(angle), sin(angle)) * reach * ((i & 1) ? 1.0 : 0.5);
-        const int2 at = clamp(p + int2(way), int2(0, 0), size - 1);
-        const float there = depth_at(at);
-        if (!(there > 0) || abs(dot(world_at(at, there, near_distance) - here, normal)) > flat) continue;
-        light = max(light, luminance(scene.Load(int3(at, 0)).rgb));
-    }
-    light = lerp(light, base, 0.1);
+    // pattern (paving joints, cracks) shows through as grey: the middle (median) brightness of samples
+    // round it on the same plane, close ones and, as a floor, wider ones. The brightest of a few samples
+    // at fixed offsets copied anything bright near them onto the snow once for every offset (the deck,
+    // shoes, a kerb: four to eight ghost copies round it, 2026-11-11); one thing cannot be the middle of
+    // sixteen, and the samples turn a different way at every pixel, so nothing lines up into a copy.
+    const float own = luminance(under.rgb);
+    const float spin = hash(float2(p) * 0.618034) * 6.2831853; // the same each frame: no shimmer
+    const float close = median_light(p, here, normal, near_distance, max(back_height.w * 0.008, 3.0), max(0.004, view_distance * 0.002), spin, own);
+    const float wide = median_light(p, here, normal, near_distance, back_height.w * 0.03, max(0.02, view_distance * 0.01), spin + 0.2, close);
     // Not darker than about 60% of the snow round about: the picture still has the game's motion blur
     // and smear in it, faint dark copies of moving things (and the skater's soft contact shadow) that
     // showed on the snow as ghost outlines and a dark disc. Snow scatters light: its shadows are pale.
-    float around = light;
-    [unroll] for (int j = 0; j < 8; ++j) {
-        const float angle = j * 0.7853982 + 0.39;
-        const int2 at = clamp(p + int2(float2(cos(angle), sin(angle)) * back_height.w * 0.035), int2(0, 0), size - 1);
-        const float there = depth_at(at);
-        if (!(there > 0) || abs(dot(world_at(at, there, near_distance) - here, normal)) > flat * 5) continue;
-        around = max(around, luminance(scene.Load(int3(at, 0)).rgb));
-    }
-    light = max(light, around * 0.6);
+    const float light = max(lerp(close, own, 0.1), wide * 0.6);
     float3 lit = colour_amount.rgb * light * shape.z * (1 - pressed * 0.35);
     if (extra.x > 0) {
         const float glint = hash(floor(steady.xz * 38.0) + floor(steady.y * 38.0));

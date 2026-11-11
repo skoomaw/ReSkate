@@ -140,6 +140,10 @@ struct Shared {
     // The frame: the screen's size, the main depth buffer (last seen), the world colour.
     std::uint32_t width{}, height{};
     ID3D12Resource* main_depth{};
+    // A reference of ours on it while it is the world's depth: a level loaded again freed the game's,
+    // and the pointer kept was read as a depth buffer after it had gone (a crash as the snowskate deck
+    // went on, 2026-11-11). Let go (through `retiring`) whenever the cover rests: menus, loading.
+    ComPtr<ID3D12Resource> main_depth_hold;
     std::uint32_t depth_width{}, depth_height{};
     ID3D12Resource* colour{};
     DXGI_FORMAT colour_format{};
@@ -392,6 +396,7 @@ void STDMETHODCALLTYPE hooked_render_pass(ID3D12GraphicsCommandList4* list, UINT
 
 bool record_cover(Shared& s);
 bool snapshot_depth(Shared& s, ID3D12CommandQueue* queue, ExecuteFn original);
+bool depth_shaped(const D3D12_RESOURCE_DESC& d, std::uint32_t width, std::uint32_t height);
 
 // Under the lock. A short name for a picture in the trace: #1, #2, ...
 // `d`, when given, describes it the first time (the picture may be gone when the trace ends).
@@ -790,6 +795,8 @@ bool snapshot_depth(Shared& s, ID3D12CommandQueue* queue, ExecuteFn original) {
         (s.depth_state & (D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_UNORDERED_ACCESS)) || s.depth_elsewhere)
         return false;
     const auto d = s.main_depth->GetDesc();
+    // Still the depth buffer it was found as.
+    if (!depth_shaped(d, s.depth_width, s.depth_height) || d.Width != s.depth_width || d.Height != s.depth_height) return false;
     const DXGI_FORMAT read = depth_read_format(s, d);
     if (read == DXGI_FORMAT_UNKNOWN) {
         if (!s.said_depth) {
@@ -1252,6 +1259,23 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
         active.store(ready && wanted.load() && allowed.load());
         if (!active.load()) {
             s.notes.clear();
+            // The world's depth is found again when the cover is back: a level loaded meanwhile has a
+            // new one, and the old one is the game's to free.
+            if (s.main_depth) {
+                if (s.main_depth_hold) s.retiring.push_back({s.fence_value, s.main_depth_hold});
+                s.main_depth_hold.Reset();
+                s.main_depth = nullptr;
+                main_depth_now.store(nullptr);
+                for (auto& handle : depth_handles) handle.store(0);
+                s.depth_state_known = false;
+                s.depth_width = s.depth_height = 0;
+                s.colour = nullptr;
+                s.depth_copied_frame = ~std::uint64_t{0};
+            }
+            if (s.fence) {
+                const UINT64 done = s.fence->GetCompletedValue();
+                std::erase_if(s.retiring, [&](const auto& r) { return r.first <= done; });
+            }
             return;
         }
         if (s.pending && !s.drawn && !s.said_late) {
@@ -1395,6 +1419,7 @@ void release() noexcept {
         s.queue = nullptr;
         s.colour = nullptr;
         s.main_depth = nullptr;
+        s.main_depth_hold.Reset();
         main_depth_now.store(nullptr);
         s.depth_state_known = false;
         s.failed = false;
@@ -1552,6 +1577,8 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
         // not been seen for 30 presents (the screen got smaller).
         if (s.main_depth && desc.Width * desc.Height <= UINT64{s.depth_width} * s.depth_height && s.main_missed < 30) return;
         // A new main depth buffer (a resize, a level): its views are looked for afresh.
+        if (s.main_depth_hold) s.retiring.push_back({s.fence_value, s.main_depth_hold});
+        s.main_depth_hold = resource;
         s.main_depth = resource;
         main_depth_now.store(resource);
         s.depth_state_known = false;
