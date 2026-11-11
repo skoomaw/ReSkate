@@ -54,6 +54,7 @@ struct State {
     std::atomic<std::uint32_t> surface_sound{}, surface_now{}, surface_fields{~0U};
     std::atomic<bool> surface_resend{}; // the whole state goes once (the surface sound changed)
     int surface_resend_in{};            // local updates until it goes whole (0: not waiting); under mutex
+    unsigned surface_updates{};         // local updates with a surface sound, for its regular resend; under mutex
     std::mutex surface_mutex;                  // guards surface_from
     std::vector<std::uint32_t> surface_from;   // the slots that take surface_sound (empty: all)
     std::atomic<std::uint64_t> surface_read_at{};
@@ -191,6 +192,11 @@ void submit_hook(Address handle, const NativeAudioFrame *frame) {
             std::lock_guard lock(s.mutex);
             bool resend = s.surface_resend.exchange(false, std::memory_order_acq_rel);
             if (s.surface_resend_in > 0 && --s.surface_resend_in == 0) resend = true;
+            // And every 30 updates (about half a second) while a surface sound is set: the game can put
+            // its own state back without telling (a reset to a marker went back to the default
+            // surface's sound, concrete's, and stayed there; 2026-11-11), and a field it does not
+            // change is never sent again.
+            if (sound_word && ++s.surface_updates % 30 == 0) resend = true;
             if (sound_word) {
                 full = *s.accumulated;
                 copy(&full, &snapshot, masks.data());
