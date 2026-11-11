@@ -408,6 +408,12 @@ struct FakeGame final : Game {
     std::optional<MarkerEvents> marker_events(std::string_view plugin) override {
         return std::exchange(marker_feed[std::string(plugin)], {});
     }
+    std::optional<std::uint32_t> surface_now, surface_set;
+    std::optional<std::uint32_t> skater_surface() override { return surface_now; }
+    std::string skater_surface_sound(std::string_view, std::optional<std::uint32_t> word) override {
+        surface_set = word;
+        return {};
+    }
     std::vector<std::pair<std::string, bool>> chosen_variants; // each choice, and whether it went in now
     std::string choose_variant(std::string_view, const std::filesystem::path&, std::string_view variant, bool now) override {
         chosen_variants.emplace_back(std::string(variant), now);
@@ -1500,6 +1506,29 @@ Candidate script(const std::string& id, const std::string& main, const std::stri
 }
 
 void running(const Host& host, std::string_view id, const TestEnvironment& environment);
+
+void the_skater_surface_sound_can_be_read_and_set() {
+    TestEnvironment environment;
+    environment.fake.surface_now = 0x1234c1u;
+    Host host(environment, Side::client);
+    host.apply({script("surface-sound", R"(
+        local grass = reskate.skater.surface()
+        assert(grass == 0x1234c1, tostring(grass))
+        assert(reskate.skater.surface_sound(grass))
+        assert(not pcall(reskate.skater.surface_sound, 0.5), "a fraction is no surface")
+        assert(not pcall(reskate.skater.surface_sound, -1), "a negative is no surface")
+    )", R"("skater.read", "skater.control")")});
+    running(host, "surface-sound", environment);
+    check(environment.fake.surface_set == 0x1234c1u, "surface_sound passes the surface word on");
+    TestEnvironment denied_environment;
+    Host denied(denied_environment, Side::client);
+    denied.apply({script("surface-denied", R"(
+        assert(not pcall(reskate.skater.surface_sound, 7), "needs skater.control")
+        assert(not pcall(reskate.skater.surface), "needs skater.read")
+    )")});
+    running(denied, "surface-denied", denied_environment);
+    check(!denied_environment.fake.surface_set, "a plugin without skater.control set no surface sound");
+}
 
 void a_variant_can_wait_for_the_next_launch() {
     TestEnvironment environment;
@@ -7222,6 +7251,7 @@ int main() {
         std::filesystem::remove_all(scratch);
         run(a_manifest_says_what_a_plugin_is);
         run(a_variant_can_wait_for_the_next_launch);
+        run(the_skater_surface_sound_can_be_read_and_set);
         run(ui_value_reservations_enforce_limits_and_collisions);
         run(plugins_publish_only_their_own_ui_values);
         run(plugin_approval_follows_the_plugins_own_files);

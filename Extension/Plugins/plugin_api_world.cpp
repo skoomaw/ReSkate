@@ -44,7 +44,30 @@ struct WorldApi {
         else lua_pushstring(L, skater_state_name(*now));
         return 1;
     }
+    // surface(): the surface the local skater's sounds are of now, a physics material word as the game
+    // gives it (whatever surface sound is set); nil when none is known.
+    static int surface(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "skater.read", "reskate.skater.surface");
+        const auto word = game_of(plugin).skater_surface();
+        if (!word) lua_pushnil(L);
+        else lua_pushnumber(L, static_cast<double>(*word));
+        return 1;
+    }
     // ---- skater.control ------------------------------------------------------------------------
+    // surface_sound(word or nil): the local skater's sounds (rolling, landing, grinding) as on the
+    // surface that word names (from surface()), wherever the skater is; nil gives each surface its own.
+    static int surface_sound(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "skater.control", "reskate.skater.surface_sound");
+        std::optional<std::uint32_t> word;
+        if (!lua_isnoneornil(L, 1)) {
+            const double value = luaL_checknumber(L, 1);
+            if (!(value >= 1 && value <= 4294967295.0) || value != std::floor(value)) luaL_argerror(L, 1, "not a surface from reskate.skater.surface");
+            word = static_cast<std::uint32_t>(value);
+        }
+        return result(L, game_of(plugin).skater_surface_sound(plugin.id(), word));
+    }
     static int control(lua_State* L, const char* action) {
         auto& plugin = plugin_of(L);
         need(L, plugin, "skater.control", "reskate.skater control");
@@ -3462,7 +3485,7 @@ void WorldApi::install(Plugin& plugin, lua_State* L) {
     lua_pushstring(L, "locked");
     lua_setfield(L, -2, "__metatable");
     lua_setfield(L, LUA_REGISTRYINDEX, "reskate.permissions");
-    add_functions(L, "skater", {{"state", state}, {"noclip", noclip}, {"boost", boost}, {"freeze", freeze}, {"wipeout", wipeout}, {"xray", xray},
+    add_functions(L, "skater", {{"state", state}, {"surface", surface}, {"surface_sound", surface_sound}, {"noclip", noclip}, {"boost", boost}, {"freeze", freeze}, {"wipeout", wipeout}, {"xray", xray},
                                 {"shape_launch", shape_launch}, {"hide", hide_skater}, {"reach", reach}, {"carry", carry}, {"hand", hand}, {"joint", skater_joint}, {"pose", skater_pose}});
     add_functions(L, "board", {{"motion", board_motion}, {"bones", board_bones}, {"set", board_set}, {"hide", board_hide}, {"clear", board_clear}, {"scale", board_scale},
                                {"park", board_park}, {"fit", board_fit}, {"toss", board_toss}, {"parameters", board_parameters},

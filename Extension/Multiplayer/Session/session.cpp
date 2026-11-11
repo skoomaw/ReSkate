@@ -1292,6 +1292,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool ready, std::string_vi
                 try {
                     const auto solo = capture_local(base, client, false);
                     if (solo.ready) note_local_skater(solo.pose.root);
+                    // A plugin's surface sound (reskate.skater.surface_sound) needs the local skater's
+                    // sound updates found: outside a session too, while one asks.
+                    if (solo.ready && surface_wanted()) prepare_audio_capture(base, solo);
                 } catch (...) {}
             }
             publish(s);

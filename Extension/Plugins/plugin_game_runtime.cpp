@@ -44,6 +44,7 @@
 #include "plugin_camera.h"
 #include "Extension/Multiplayer/Session/session.h"
 #include "Extension/Multiplayer/Remote/stand_ins.h"
+#include "Extension/Multiplayer/Remote/native_audio.h"
 #include "Extension/Music/external_player.h"
 #include "Extension/Music/music_inject.h"
 #include "Extension/Music/spotify_station.h"
@@ -1977,6 +1978,17 @@ public:
             camera_releasing_ = false;
         }
     }
+    std::optional<std::uint32_t> skater_surface() override {
+        const auto word = multiplayer::local_surface();
+        return word ? std::optional(word) : std::nullopt;
+    }
+    std::string skater_surface_sound(std::string_view plugin, std::optional<std::uint32_t> word) override {
+        if (!surfacer_.empty() && surfacer_ != plugin) return "another plugin sets the skater's surface sound";
+        multiplayer::set_surface_sound(word.value_or(0));
+        if (word) surfacer_ = std::string(plugin);
+        else surfacer_.clear();
+        return {};
+    }
     std::string freeze(std::string_view plugin, bool on) override {
         const bool before = !freezers_.empty();
         if (on) {
@@ -2078,6 +2090,10 @@ public:
             screen_look::clear();
             looker_.clear();
         }
+        if (surfacer_ == plugin) {
+            multiplayer::set_surface_sound(0);
+            surfacer_.clear();
+        }
         if (coverer_ == plugin) {
             world_cover::clear();
             world_cover::keep_clear({});
@@ -2170,6 +2186,7 @@ private:
     std::string room_owner_; // the plugin in the character room (room_open)
     std::uint64_t pose_at_{};
     std::string looker_;  // the plugin whose look is on the screen (screen_look)
+    std::string surfacer_; // the plugin whose surface sound the local skater's sounds have
     std::string coverer_; // the plugin whose cover is over the world (world_cover)
     std::string viewmodeler_; // the plugin whose viewmodel is loaded (viewmodel_load)
     std::uint64_t look_at_{};

@@ -354,6 +354,9 @@ void reset_audio() noexcept {}
 std::string native_audio_status() { return {}; }
 std::uint64_t captured_audio_frames() noexcept { return 0; }
 std::uint64_t played_audio_frames() noexcept { return 0; }
+void set_surface_sound(std::uint32_t) noexcept {}
+std::uint32_t local_surface() noexcept { return 0; }
+bool surface_wanted() noexcept { return false; }
 void update_player_ui(std::uintptr_t, const Pose *, std::string) noexcept {}
 void update_party_position(const Pose *) noexcept {}
 std::string player_ui_status() { return {}; }

@@ -49,6 +49,10 @@ struct State {
     bool attempted{}, installed{};
     std::mutex mutex;
     std::unique_ptr<NativeAudioFrame> accumulated = std::make_unique<NativeAudioFrame>();
+    // The local skater's updates as the game gave them, merged: the surface it is on.
+    std::unique_ptr<NativeAudioFrame> as_given = std::make_unique<NativeAudioFrame>();
+    std::atomic<std::uint32_t> surface_sound{}, surface_now{};
+    std::atomic<std::uint64_t> surface_read_at{};
     AudioCaptureBuffer queue;
     std::string capture_issue;
     // Each slot's remote sound component, contiguous so submit_hook (every skater's
@@ -90,6 +94,20 @@ void set_remote_component(Address component) noexcept {
     }
     remote_component().store(component, std::memory_order_release);
 }
+// The material word most of a frame's material fields name (their slots; flags aside), 0 for none.
+std::uint32_t most_named_surface(const NativeAudioFrame &frame) noexcept {
+    std::array<std::uint32_t, audio_material_offsets.size()> words{};
+    for (std::size_t i = 0; i < words.size(); ++i) words[i] = audio_value<std::uint32_t>(frame, audio_material_offsets[i]);
+    std::uint32_t best{};
+    std::size_t best_count{};
+    for (const auto word : words) {
+        if (!word) continue;
+        const auto count = static_cast<std::size_t>(std::count_if(words.begin(), words.end(),
+            [&](std::uint32_t other) { return other && (other & ~0x3fU) == (word & ~0x3fU); }));
+        if (count > best_count) best = word, best_count = count;
+    }
+    return best;
+}
 void submit_hook(Address handle, const NativeAudioFrame *frame) {
     auto &s = state();
     // The visual-only actor submits default inputs after animation evaluation.
@@ -119,27 +137,43 @@ void submit_hook(Address handle, const NativeAudioFrame *frame) {
     SetLastError(error_before);
     if (suppress)
         return;
-    s.submit(handle, frame); // Original local audio is always forwarded unchanged.
     const auto c = s.local_component.load(std::memory_order_acquire);
-    if (!c || handle != c + 0x74)
+    if (!c || handle != c + 0x74) {
+        s.submit(handle, frame); // Every other skater's sound goes on unchanged.
         return;
+    }
+    // The local skater's: read once, its surface sound put in when one is set, and passed on.
+    NativeAudioFrame snapshot;
+    const bool read = readable(reinterpret_cast<Address>(frame), snapshot.bytes.data(), 0x218);
+    NativeAudioFrame given = snapshot;
+    const auto sound_word = s.surface_sound.load(std::memory_order_acquire);
+    if (read && sound_word) {
+        for (const auto offset : audio_material_offsets) {
+            const auto word = audio_value<std::uint32_t>(snapshot, offset);
+            if (word) audio_put(snapshot, offset, (word & 0x3fU) | (sound_word & ~0x3fU));
+        }
+        s.submit(handle, &snapshot);
+    } else {
+        s.submit(handle, frame); // Original local audio is forwarded unchanged.
+    }
     const auto error = GetLastError();
     std::lock_guard lock(s.mutex);
     try {
         if (c != s.local_component.load() || ptr(c) != s.base + addr::engine::skater_audio_component_vtable ||
             ptr(ptr(c, 0x18)) != s.local_entity.load() || get<std::uint16_t>(handle) < 2)
             throw std::runtime_error("Local sound capture ownership changed.");
-        NativeAudioFrame snapshot;
-        require(readable(reinterpret_cast<Address>(frame), snapshot.bytes.data(), 0x218),
-                "Native sound update is unreadable.");
+        require(read, "Native sound update is unreadable.");
         const std::array<std::uint32_t, 4> masks{
             audio_value<std::uint32_t>(snapshot, 0x164), audio_value<std::uint32_t>(snapshot, 0x130),
             audio_value<std::uint32_t>(snapshot, 0x124), audio_value<std::uint32_t>(snapshot, 0xc0)};
         require(!(masks[3] & ~0x07ffffffU), "Native sound update fields differ.");
         // Pure native field copy merges partial updates into owned storage.
         // It contains only primitive fields and does not allocate or call out.
-        reinterpret_cast<void (*)(NativeAudioFrame *, const NativeAudioFrame *, const void *)>(
-            s.base + sound::frame_copy)(s.accumulated.get(), &snapshot, masks.data());
+        const auto copy = reinterpret_cast<void (*)(NativeAudioFrame *, const NativeAudioFrame *, const void *)>(
+            s.base + sound::frame_copy);
+        copy(s.accumulated.get(), &snapshot, masks.data());
+        copy(s.as_given.get(), &given, masks.data());
+        s.surface_now.store(most_named_surface(*s.as_given), std::memory_order_release);
         s.queue.push(audio_state(*s.accumulated), now_us());
         ++s.captured;
         s.capture_issue.clear();
@@ -227,6 +261,9 @@ void prepare_audio_capture(Address base, const NativeFrame &local) noexcept {
             s.queue.clear();
             *s.accumulated = {};
             reinterpret_cast<void (*)(void *)>(base + sound::frame_reset)(s.accumulated.get());
+            *s.as_given = {};
+            reinterpret_cast<void (*)(void *)>(base + sound::frame_reset)(s.as_given.get());
+            s.surface_now.store(0, std::memory_order_release);
             s.local_entity.store(local.entity);
             s.local_component.store(component, std::memory_order_release);
             s.capture_issue.clear();
@@ -236,6 +273,16 @@ void prepare_audio_capture(Address base, const NativeFrame &local) noexcept {
         std::lock_guard lock(s.mutex);
         s.capture_issue = e.what();
     }
+}
+void set_surface_sound(std::uint32_t word) noexcept { state().surface_sound.store(word, std::memory_order_release); }
+std::uint32_t local_surface() noexcept {
+    auto &s = state();
+    s.surface_read_at.store(now_us(), std::memory_order_relaxed);
+    return s.local_component.load(std::memory_order_acquire) ? s.surface_now.load(std::memory_order_acquire) : 0;
+}
+bool surface_wanted() noexcept {
+    const auto &s = state();
+    return s.surface_sound.load(std::memory_order_relaxed) || now_us() - s.surface_read_at.load(std::memory_order_relaxed) < 5000000;
 }
 std::vector<AudioSample> drain_audio_capture(std::uint64_t now) {
     auto &s = state();
