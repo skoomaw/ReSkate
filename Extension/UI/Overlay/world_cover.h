@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <d3d12.h>
 #include <vector>
 
@@ -60,6 +61,21 @@ void clear() noexcept;
 // The first one also measures the depth's scale on the ground round its foot, which the cylinders and
 // the trails need; the scale is held from many frames, so they stay put while the foot is out of view.
 void keep_clear(std::vector<Clear> places) noexcept;
+// A tread drawn over the underside of the local skater's deck (a snowskate's), see-through by
+// `opacity` so the deck's graphic shows behind it: ridges along the deck, `spacing` apart, each
+// `ridge` of the spacing wide, over a rounded patch `width` by `length` (metres) centred on the deck,
+// `height` from the deck's bone (its underside, in the deck's own up). Drawn with the cover, from the
+// deck as the board's pose last drew it (board_pose::deck_in_world).
+struct Tread {
+    std::array<float, 3> colour{0.08f, 0.08f, 0.09f};
+    float opacity{0.55f}; // 0..1
+    float width{0.19f}, length{0.62f};
+    float height{-0.006f};
+    float spacing{0.016f}, ridge{0.5f};
+};
+// Client thread: on until set again with none.
+void set_tread(std::optional<Tread> tread) noexcept;
+
 // Client thread: a point on a trail through the cover (where a board goes): the cover is pressed away
 // along the trail, `width` wide, and fills back in over `fade` seconds. At most 256 points are kept, the
 // oldest dropped first; a point closer than a few centimetres to the last is not added.

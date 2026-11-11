@@ -1272,6 +1272,7 @@ public:
             if (coverer_ == plugin) {
                 world_cover::clear();
                 world_cover::keep_clear({});
+                world_cover::set_tread(std::nullopt);
                 coverer_.clear();
             }
             return {};
@@ -1288,6 +1289,19 @@ public:
     std::string world_cover_trail(std::string_view plugin, const CoverTrail& point) override {
         if (coverer_ != plugin) return "this plugin has no cover on the world";
         world_cover::add_trail(point.at, point.width, point.fade);
+        return {};
+    }
+    std::string world_cover_tread(std::string_view plugin, std::optional<BoardTread> tread) override {
+        if (coverer_ != plugin) return tread ? "this plugin has no cover on the world" : std::string{};
+        if (!tread) {
+            world_cover::set_tread(std::nullopt);
+            return {};
+        }
+        world_cover::Tread t;
+        t.colour = tread->colour;
+        t.opacity = tread->opacity, t.width = tread->width, t.length = tread->length, t.height = tread->height;
+        t.spacing = tread->spacing, t.ridge = tread->ridge;
+        world_cover::set_tread(t);
         return {};
     }
     std::string world_cover_clear(std::string_view plugin, const std::vector<CoverClear>& places) override {
@@ -2067,6 +2081,7 @@ public:
         if (coverer_ == plugin) {
             world_cover::clear();
             world_cover::keep_clear({});
+            world_cover::set_tread(std::nullopt);
             coverer_.clear();
         }
         if (viewmodeler_ == plugin) {

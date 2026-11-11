@@ -3,6 +3,7 @@
 #include "Engine/Core/Hooks/hooks.h"
 #include "Engine/Core/Log/logging.h"
 #include "Extension/Plugins/plugin_camera.h"
+#include "Extension/Skater/board_pose.h"
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -53,7 +54,9 @@ constexpr std::size_t most_trail = 256; // world_cover.hlsl's MOST_TRAIL
 // (their agreement differed by noise), and every change moved the whole cover by a frame (2026-11-11).
 constexpr std::size_t camera_candidates = 1;
 constexpr std::size_t camera_floats = 12; // right, up, back, eye
-constexpr UINT64 trail_slice = ((most_trail * 2 + 2 + camera_candidates * 4) * 16 + 255) / 256 * 256;
+// Then the deck's tread (set_tread): five float4s (world_cover.hlsl's tread_over).
+constexpr std::size_t tread_floats4 = 5;
+constexpr UINT64 trail_slice = ((most_trail * 2 + 2 + camera_candidates * 4 + tread_floats4) * 16 + 255) / 256 * 256;
 // The measurements: one row a candidate camera, a column a point (ps_measure), read back by the CPU.
 constexpr UINT measure_columns = 32;
 constexpr UINT measure_pitch = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
@@ -90,6 +93,7 @@ struct Asked {
         std::uint64_t when{};
     };
     std::deque<TrailPoint> trail;
+    std::optional<Tread> tread;
 };
 Asked& asked() { static auto* value = new Asked; return *value; }
 std::atomic<bool> wanted{};
@@ -957,6 +961,7 @@ bool record_cover(Shared& s) {
 
     Settings settings;
     std::vector<Clear> clear;
+    std::optional<Tread> tread;
     const std::uint64_t now = GetTickCount64();
     // This frame's trails, into this command allocator's part of the upload buffer.
     {
@@ -968,6 +973,7 @@ bool record_cover(Shared& s) {
         settings = a.settings;
         if (now < a.clear_until) clear = a.clear;
         std::erase_if(a.trail, [&](const auto& t) { return now - t.when > static_cast<std::uint64_t>(t.fade * 1000); });
+        tread = a.tread;
         for (const auto& t : a.trail) {
             const float strength = 1.0f - static_cast<float>(now - t.when) / (t.fade * 1000.0f);
             float* const point = out + 8 + count * 8;
@@ -979,6 +985,19 @@ bool record_cover(Shared& s) {
         }
         out[0] = static_cast<float>(count), out[1] = box[0], out[2] = box[1], out[3] = box[2];
         out[4] = box[3], out[5] = box[4], out[6] = box[5], out[7] = 0;
+        // The deck's tread, after the cameras: off unless asked for and the deck was drawn just now.
+        {
+            float* const to = out + (most_trail * 2 + 2 + camera_candidates * 4) * 4;
+            std::fill(to, to + tread_floats4 * 4, 0.0f);
+            const auto deck = tread ? board_pose::deck_in_world() : std::nullopt;
+            if (tread && deck && now - deck->at_ms < 250) {
+                to[0] = deck->rotation[0], to[1] = deck->rotation[1], to[2] = deck->rotation[2], to[3] = deck->rotation[3];
+                to[4] = deck->position[0], to[5] = deck->position[1], to[6] = deck->position[2], to[7] = 1;
+                to[8] = tread->colour[0], to[9] = tread->colour[1], to[10] = tread->colour[2], to[11] = tread->opacity;
+                to[12] = tread->width * 0.5f, to[13] = tread->length * 0.5f, to[14] = tread->height, to[15] = 0.008f;
+                to[16] = tread->spacing, to[17] = tread->ridge;
+            }
+        }
         // The candidate cameras for ps_measure, after the most points there can be.
         for (std::size_t c = 0; c < camera_candidates; ++c) {
             const auto& from = s.cameras[std::min(c, s.cameras_known - 1)];
@@ -1152,6 +1171,13 @@ void add_trail(const std::array<float, 3>& at, float width, float fade) noexcept
         }
         a.trail.push_back({at, width, fade, GetTickCount64()});
         while (a.trail.size() > most_trail) a.trail.pop_front();
+    } catch (...) {}
+}
+void set_tread(std::optional<Tread> tread) noexcept {
+    try {
+        auto& a = asked();
+        std::lock_guard lock(a.mutex);
+        a.tread = tread;
     } catch (...) {}
 }
 void keep_clear(std::vector<Clear> places) noexcept {

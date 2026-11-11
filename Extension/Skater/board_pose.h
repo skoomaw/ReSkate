@@ -58,6 +58,15 @@ std::string toss(std::string_view owner, std::vector<int> list, Vec3 velocity, V
 // The local board's bones as last drawn, in their parents' frames; empty without a board, and until
 // the board the local skater has now is drawn (a map load leaves the last one behind).
 std::optional<std::array<Bone, bones>> read();
+// The local board's deck (bone 3) in the world as last drawn, after what plugins wrote there (a
+// deck drawn lower is lower here too), and when (GetTickCount64, ms). Bone 1 is the board's place in
+// the world, the mount (2) hangs on it and the deck on the mount. Any thread.
+struct Placed {
+    Quat rotation{0, 0, 0, 1};
+    Vec3 position{};
+    std::uint64_t at_ms{};
+};
+std::optional<Placed> deck_in_world();
 // Each client tick: the local skater's animation component (0 for none). Once a plugin uses
 // reskate.board, installs the render pose hook its drawing goes through.
 void tick(std::uintptr_t base, std::uintptr_t component) noexcept;

@@ -123,6 +123,41 @@ float noise(float2 p) {
 
 float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
+// A tread over the underside of the local skater's deck (world_cover.cpp: five float4s after the
+// cameras): the deck's rotation, its place (w: 1 when on), the tread's colour and opacity, its half
+// width, half length, height from the deck's bone and how thick a slice of the deck counts as its
+// underside, then the ridges' spacing and width. Only where the surface faces the deck's down.
+float3 tread_over(float3 shown, float3 here, float3 normal) {
+    const int at = 2 + MOST_TRAIL * 2 + CANDIDATES * 4;
+    const float4 place = trail[at + 1];
+    if (place.w < 0.5) return shown;
+    const float4 q = trail[at];
+    const float4 look = trail[at + 2];
+    const float4 size = trail[at + 3];
+    const float4 ridges = trail[at + 4];
+    // Into the deck's frame: the conjugate rotation of the offset.
+    const float3 v = here - place.xyz;
+    const float3 u = -q.xyz;
+    const float3 t = 2 * cross(u, v);
+    const float3 local = v + q.w * t + cross(u, t);
+    const float3 tn = 2 * cross(u, normal);
+    const float3 local_normal = normal + q.w * tn + cross(u, tn);
+    if (local_normal.y > -0.5 || abs(local.y - size.z) > size.w) return shown;
+    // A rounded patch: straight along the middle, round at its ends.
+    const float straight = max(size.y - size.x, 0);
+    const float2 off = float2(local.x, max(abs(local.z) - straight, 0));
+    const float edge = length(off) - size.x;
+    if (edge > 0.004) return shown;
+    const float inside = 1 - smoothstep(-0.004, 0.004, edge);
+    // Ridges along the deck, across its width: raised (solid) and between them thinner.
+    const float phase = frac(local.x / max(ridges.x, 0.002));
+    const float ridge = smoothstep(0, 0.12, phase) * (1 - smoothstep(ridges.y, ridges.y + 0.12, phase));
+    const float amount = look.w * inside * lerp(0.55, 1.0, ridge);
+    // Lit as the deck there is lit: its brightness, without its colour.
+    const float3 lit = look.rgb * max(luminance(shown), 1e-4) * 2.5 * lerp(0.8, 1.15, ridge);
+    return lerp(shown, lit, saturate(amount));
+}
+
 // How much a trail has pressed the cover away at this point: 0 none, 1 all of it.
 float trail_at(float3 here) {
     const float4 head = trail[0];
@@ -233,10 +268,12 @@ Output ps_main(Vertex input) {
     float3 normal = cross(along, across);
     const float length_squared = dot(normal, normal);
     float cover = 0;
+    float3 shown = under.rgb; // the picture, with the deck's tread over it
     if (length_squared > 1e-20) {
         normal *= rsqrt(length_squared);
         // Facing the camera: the side the pixel is seen from.
         if (dot(normal, eye_near.xyz - here) < 0) normal = -normal;
+        if (near_measured > 0) shown = tread_over(shown, here, normal);
         // Patchy where it thins: large, slow noise over the ground, in the world, so it stays put.
         const float patch = noise(steady.xz * 0.45) * 0.65 + noise(steady.xz * 1.9) * 0.35;
         const float facing = shape.x + (patch - 0.5) * shape.w * 0.6;
@@ -308,7 +345,7 @@ Output ps_main(Vertex input) {
     }
     out_.cover = float2(cover, view_distance);
     if (cover <= 0.002) {
-        out_.colour.rgb = snowfall(under.rgb, p, scene_distance, exposure);
+        out_.colour.rgb = snowfall(shown, p, scene_distance, exposure);
         return out_;
     }
 
@@ -349,6 +386,6 @@ Output ps_main(Vertex input) {
         const float glint = hash(floor(steady.xz * 38.0) + floor(steady.y * 38.0));
         lit += light * extra.x * 6.0 * step(0.996, glint);
     }
-    out_.colour = float4(snowfall(lerp(under.rgb, lit, cover), p, scene_distance, exposure), under.a);
+    out_.colour = float4(snowfall(lerp(shown, lit, cover), p, scene_distance, exposure), under.a);
     return out_;
 }

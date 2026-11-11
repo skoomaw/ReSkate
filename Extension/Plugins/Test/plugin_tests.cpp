@@ -336,6 +336,14 @@ struct FakeGame final : Game {
         calls.push_back(std::format("trail {} {:.1f} {:.1f} {:.1f} w{:.2f} f{:.1f}", plugin, point.at[0], point.at[1], point.at[2], point.width, point.fade));
         return {};
     }
+    std::string world_cover_tread(std::string_view plugin, std::optional<BoardTread> t) override {
+        if (coverer != plugin) return t ? "this plugin has no cover on the world" : std::string{};
+        if (!t) calls.push_back(std::format("tread {} none", plugin));
+        else
+            calls.push_back(std::format("tread {} {:.2f} {:.2f} {:.2f} o{:.2f} w{:.2f} l{:.2f} h{:.3f} s{:.3f} r{:.2f}", plugin, t->colour[0], t->colour[1],
+                                        t->colour[2], t->opacity, t->width, t->length, t->height, t->spacing, t->ridge));
+        return {};
+    }
     std::string world_cover_clear(std::string_view plugin, const std::vector<CoverClear>& places) override {
         if (coverer != plugin) return "this plugin has no cover on the world";
         std::string line = std::format("keep clear {} {}", plugin, places.size());
@@ -4696,6 +4704,12 @@ void plugins_cover_the_world() {
         assert(reskate.effects.trail({position = vector.create(1, 0, 3), width = 0.3, fade = 12}))
         assert(not pcall(reskate.effects.trail, {position = vector.create(0, 0, 0), fade = 100}), "a fade is 0.5 to 60 s")
         assert(not pcall(reskate.effects.trail, {width = 0.2}), "a trail point has a position")
+        assert(reskate.effects.tread({}))
+        assert(reskate.effects.tread({colour = {r = 0.2, g = 0.3, b = 0.4}, opacity = 0.4, width = 0.2, length = 0.5, height = 0.01, spacing = 0.02, ridge = 0.3}))
+        assert(not pcall(reskate.effects.tread, {opacity = 2}), "an opacity is 0 to 1")
+        assert(not pcall(reskate.effects.tread, {spacing = 1}), "a spacing is 0.004 to 0.1")
+        assert(not pcall(reskate.effects.tread, {colour = {r = 1}}), "a colour has three channels")
+        assert(reskate.effects.tread(nil))
         reskate.log("covered")
     )"}});
     host.apply({snow});
@@ -4709,27 +4723,33 @@ void plugins_cover_the_world() {
           "Places kept clear of the cover, with their defaults, and none\n" + environment.all());
     check(game.called("trail snow 1.0 0.0 2.0 w0.25 f10.0") && game.called("trail snow 1.0 0.0 3.0 w0.30 f12.0"),
           "Trail points through the cover, with their defaults\n" + environment.all());
+    check(game.called("tread snow 0.08 0.08 0.09 o0.55 w0.19 l0.62 h-0.006 s0.016 r0.50") &&
+              game.called("tread snow 0.20 0.30 0.40 o0.40 w0.20 l0.50 h0.010 s0.020 r0.30") && game.called("tread snow none"),
+          "A tread on the deck as asked, its defaults, and none\n" + environment.all());
     // A second plugin is told whose cover it is; nil from it does not end the first one's.
     host.apply({snow, package("sand", {{manifest_file, manifest(R"("effects")")}, {"plugin/main.lua", R"(
         local ok, why = reskate.effects.cover({colour = {r = 0.8, g = 0.7, b = 0.5}})
         reskate.log(tostring(ok) .. " " .. tostring(why))
         local kept, not_why = reskate.effects.keep_clear({{position = vector.create(0, 0, 0)}})
         reskate.log("keep " .. tostring(kept) .. " " .. tostring(not_why))
+        local treaded, tread_why = reskate.effects.tread({})
+        reskate.log("tread " .. tostring(treaded) .. " " .. tostring(tread_why))
         assert(reskate.effects.cover(nil))
     )"}})});
     ticks(host, environment, 1);
     check(environment.logged("[sand] nil snow has the world's cover") && !game.called("cover sand none") && game.coverer == "snow",
           "One plugin's cover at a time\n" + environment.all());
     check(environment.logged("[sand] keep nil this plugin has no cover on the world"), "Only the cover's plugin keeps places clear of it");
+    check(environment.logged("[sand] tread nil this plugin has no cover on the world"), "Only the cover's plugin draws a tread with it");
     // Without the permission it is refused.
     host.apply({snow, package("sneaky", {{manifest_file, manifest()}, {"plugin/main.lua", R"(
         reskate.log(tostring(pcall(reskate.effects.cover, {})) .. " " .. tostring(pcall(reskate.effects.cover, nil)) .. " " ..
             tostring(pcall(reskate.effects.keep_clear, {})) .. " " .. tostring(pcall(reskate.world.controls)) .. " " ..
-            tostring(pcall(reskate.effects.trail, {position = vector.create(0, 0, 0)})))
+            tostring(pcall(reskate.effects.trail, {position = vector.create(0, 0, 0)})) .. " " .. tostring(pcall(reskate.effects.tread, {})))
     )"}})});
     ticks(host, environment, 1);
-    check(environment.logged("[sneaky] false false false false false"),
-          "effects is needed for a cover, its clear places and trails, world.environment to read the world controls\n" + environment.all());
+    check(environment.logged("[sneaky] false false false false false false"),
+          "effects is needed for a cover, its clear places, trails and tread, world.environment to read the world controls\n" + environment.all());
     check(game.coverer == "snow", "A refused plugin does not take the cover");
     // Unloading the plugin ends its cover.
     host.apply({});

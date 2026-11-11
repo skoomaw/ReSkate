@@ -204,6 +204,53 @@ struct EffectsApi {
         if (!why.empty()) { lua_pushnil(L); lua_pushlstring(L, why.data(), why.size()); return 2; }
         lua_pushboolean(L, 1); return 1;
     }
+    // tread({colour = {r, g, b}, opacity = 0.55, width = 0.19, length = 0.62, height = -0.006, spacing = 0.016,
+    // ridge = 0.5}): a tread over the underside of the local skater's deck, see-through by `opacity`
+    // (0 to 1) so the deck's graphic shows behind it: ridges along the deck `spacing` metres apart
+    // (0.004 to 0.1), each `ridge` of that wide (0.1 to 0.9), on a rounded patch `width` by `length`
+    // metres (0.05 to 0.5, 0.1 to 1.2) `height` metres from the deck's bone (-0.1 to 0.1). Drawn with
+    // the plugin's cover, so only while it has one; tread(nil) ends it.
+    static int tread(lua_State* L) {
+        auto& p = plugin_of(L);
+        need(L, p, "effects", "reskate.effects.tread");
+        std::optional<Game::BoardTread> wanted;
+        if (!lua_isnoneornil(L, 1)) {
+            luaL_checktype(L, 1, LUA_TTABLE);
+            Game::BoardTread t;
+            const auto number = [&](const char* name, float& out, double low, double high, const char* why) {
+                lua_getfield(L, 1, name);
+                if (!lua_isnil(L, -1)) {
+                    const double v = luaL_checknumber(L, -1);
+                    if (!(v >= low && v <= high)) luaL_error(L, "%s", why);
+                    out = static_cast<float>(v);
+                }
+                lua_pop(L, 1);
+            };
+            number("opacity", t.opacity, 0, 1, "a tread's opacity is 0 to 1");
+            number("width", t.width, 0.05, 0.5, "a tread's width is 0.05 to 0.5 metres");
+            number("length", t.length, 0.1, 1.2, "a tread's length is 0.1 to 1.2 metres");
+            number("height", t.height, -0.1, 0.1, "a tread's height is -0.1 to 0.1 metres");
+            number("spacing", t.spacing, 0.004, 0.1, "a tread's spacing is 0.004 to 0.1 metres");
+            number("ridge", t.ridge, 0.1, 0.9, "a tread's ridge is 0.1 to 0.9 of its spacing");
+            lua_getfield(L, 1, "colour");
+            if (!lua_isnil(L, -1)) {
+                if (!lua_istable(L, -1)) luaL_error(L, "a tread's colour is {r, g, b}, each 0 to 1");
+                const char* channels[] = {"r", "g", "b"};
+                for (std::size_t c = 0; c < 3; ++c) {
+                    lua_getfield(L, -1, channels[c]);
+                    const double v = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : -1;
+                    if (!(v >= 0 && v <= 1)) luaL_error(L, "a tread's colour is {r, g, b}, each 0 to 1");
+                    t.colour[c] = static_cast<float>(v);
+                    lua_pop(L, 1);
+                }
+            }
+            lua_pop(L, 1);
+            wanted = t;
+        }
+        const auto why = p.services_.game().world_cover_tread(p.id_, wanted);
+        if (!why.empty()) { lua_pushnil(L); lua_pushlstring(L, why.data(), why.size()); return 2; }
+        lua_pushboolean(L, 1); return 1;
+    }
     static int clear(lua_State* L) {
         auto& p = caller(L);
         p.services_.game().effects_clear(p.id_); p.effect_handles_.clear(); return 0;
@@ -212,6 +259,6 @@ struct EffectsApi {
 void install_effects_api(Plugin&, lua_State* L) {
     add_functions(L, "effects", {{"particle", EffectsApi::particle}, {"decal", EffectsApi::decal},
         {"move", EffectsApi::move}, {"stop", EffectsApi::stop}, {"opacity", EffectsApi::opacity},
-        {"release", EffectsApi::release}, {"clear", EffectsApi::clear}, {"state", EffectsApi::state}, {"cover", EffectsApi::cover}, {"keep_clear", EffectsApi::keep_clear}, {"trail", EffectsApi::trail}});
+        {"release", EffectsApi::release}, {"clear", EffectsApi::clear}, {"state", EffectsApi::state}, {"cover", EffectsApi::cover}, {"keep_clear", EffectsApi::keep_clear}, {"trail", EffectsApi::trail}, {"tread", EffectsApi::tread}});
 }
 }

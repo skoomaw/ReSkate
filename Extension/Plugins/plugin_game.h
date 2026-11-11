@@ -348,6 +348,13 @@ public:
         float width{0.25f}, fade{10};
     };
     virtual std::string world_cover_trail(std::string_view /*plugin*/, const CoverTrail&) { return unavailable; }
+    // A see-through tread over the underside of the local skater's deck, drawn with that cover
+    // (world_cover::set_tread); empty ends it. Only for the plugin whose cover it is.
+    struct BoardTread {
+        std::array<float, 3> colour{0.08f, 0.08f, 0.09f};
+        float opacity{0.55f}, width{0.19f}, length{0.62f}, height{-0.006f}, spacing{0.016f}, ridge{0.5f};
+    };
+    virtual std::string world_cover_tread(std::string_view /*plugin*/, std::optional<BoardTread>) { return unavailable; }
 
     virtual std::string object_physics(std::string_view, std::uint64_t, const std::optional<ObjectPhysics>&) { return unavailable; }
     virtual std::string object_velocity(std::string_view, std::uint64_t, const Vec3&) { return unavailable; }
