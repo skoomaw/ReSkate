@@ -48,11 +48,10 @@ constexpr UINT views_each = 3;
 // Trails (add_trail): points kept, and the buffer each frame's are written to (world_cover.hlsl's t3:
 // two float4s of header, then two a point), one part of the upload buffer per command allocator.
 constexpr std::size_t most_trail = 256; // world_cover.hlsl's MOST_TRAIL
-// The cameras the measurement tries (world_cover.hlsl's ps_measure): the one read now and the two
-// read for the frames before. The camera is read on the CPU when the cover is drawn, and the picture
-// the GPU has is from a camera up to a frame or two apart; with the wrong one every point the cover
-// works out is off as the camera moves, and the trails and the skater's clear place slid (2026-11-11).
-constexpr std::size_t camera_candidates = 3;
+// The cameras the measurement tries (world_cover.hlsl's ps_measure): only the one read now. Trying the
+// two before as well and drawing with whichever agreed best chose a different one every few seconds
+// (their agreement differed by noise), and every change moved the whole cover by a frame (2026-11-11).
+constexpr std::size_t camera_candidates = 1;
 constexpr std::size_t camera_floats = 12; // right, up, back, eye
 constexpr UINT64 trail_slice = ((most_trail * 2 + 2 + camera_candidates * 4) * 16 + 255) / 256 * 256;
 // The measurements: one row a candidate camera, a column a point (ps_measure), read back by the CPU.
@@ -186,11 +185,7 @@ struct Shared {
     // The cameras of this and the last two frames, newest first, and how many are known.
     std::array<std::array<float, camera_floats>, camera_candidates> cameras{};
     std::size_t cameras_known{};
-    // How much each candidate's measurements scatter, on average lately; the one chosen; the near
-    // distance each recent frame measured with it, and the steady middle of them (0: none yet).
-    std::array<float, camera_candidates> scatter{};
-    bool scatter_known{};
-    std::size_t chosen_camera{};
+    // The near distance each recent frame measured, and the steady middle of them (0: none yet).
     std::deque<float> nears;
     float held_near{};
     std::uint64_t measured_frames{};
@@ -869,54 +864,32 @@ bool snapshot_depth(Shared& s, ID3D12CommandQueue* queue, ExecuteFn original) {
 }
 
 // Records our list: the picture copied, then drawn back with the cover over it. Under the lock.
-// One frame's measurements (ps_measure), as read back: the camera whose points agree best over the
-// last few seconds is chosen, and the near distance held is the middle of what it measured over the
-// last 45 frames. The game's near distance stays the same for a camera, so one held is steadier than
-// any one frame's; a different camera's comes through within a second.
+// One frame's measurements (ps_measure), as read back: the biggest group of them that agree (within
+// 4% of each other) is the skater, and its middle is this frame's near distance; the distance held is
+// the middle of the last 45 frames'. The game's near distance stays the same for a camera, so one held
+// is steadier than any one frame's; a different camera's comes through within a second.
 void take_measurements(Shared& s, const std::uint8_t* rows) {
-    std::array<float, camera_candidates> middle{}, scatter{};
-    std::array<bool, camera_candidates> known{};
-    for (std::size_t c = 0; c < camera_candidates; ++c) {
-        const auto* row = reinterpret_cast<const float*>(rows + c * measure_pitch);
-        std::vector<float> values;
-        for (UINT i = 0; i < measure_columns; ++i)
-            if (std::isfinite(row[i]) && row[i] > 1e-5f && row[i] < 100.0f) values.push_back(row[i]);
-        if (values.size() < 6) continue;
-        const auto half = values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2);
-        std::nth_element(values.begin(), half, values.end());
-        middle[c] = *half;
-        for (auto& v : values) v = std::abs(v - middle[c]);
-        std::nth_element(values.begin(), half, values.end());
-        scatter[c] = *half / middle[c];
-        known[c] = true;
+    const auto* row = reinterpret_cast<const float*>(rows);
+    std::vector<float> values;
+    for (UINT i = 0; i < measure_columns; ++i)
+        if (std::isfinite(row[i]) && row[i] > 1e-5f && row[i] < 100.0f) values.push_back(row[i]);
+    std::sort(values.begin(), values.end());
+    std::size_t best_from = 0, best_count = 0;
+    for (std::size_t from = 0, to = 0; from < values.size(); ++from) {
+        while (to < values.size() && values[to] <= values[from] * 1.04f) ++to;
+        if (to - from > best_count) best_from = from, best_count = to - from;
     }
-    if (!known[0]) return;
-    for (std::size_t c = 0; c < camera_candidates; ++c) {
-        const float x = known[c] ? scatter[c] : 1.0f;
-        s.scatter[c] = s.scatter_known ? s.scatter[c] * 0.97f + x * 0.03f : x;
-    }
-    s.scatter_known = true;
-    // Another camera only when it is clearly better: they agree while the camera is still.
-    std::size_t best = s.chosen_camera;
-    for (std::size_t c = 0; c < camera_candidates; ++c)
-        if (s.scatter[c] < s.scatter[best] * 0.8f) best = c;
-    if (best != s.chosen_camera) {
-        s.chosen_camera = best;
-        s.nears.clear();
-        logging::printf(logging::Level::info, logging::Channel::graphics, "World cover: the camera %zu frame(s) back fits the picture best (scatter %.3f, %.3f, %.3f).",
-                        best, s.scatter[0], s.scatter[1], s.scatter[2]);
-    }
-    if (!known[s.chosen_camera]) return;
-    s.nears.push_back(middle[s.chosen_camera]);
+    if (best_count < 5) return;
+    s.nears.push_back(values[best_from + best_count / 2]);
     while (s.nears.size() > 45) s.nears.pop_front();
     std::vector<float> sorted(s.nears.begin(), s.nears.end());
     const auto half = sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2);
     std::nth_element(sorted.begin(), half, sorted.end());
     // Only once a few frames agree on it.
     s.held_near = sorted.size() >= 5 ? *half : s.held_near;
-    if (++s.measured_frames == 300)
-        logging::printf(logging::Level::info, logging::Channel::graphics, "World cover: near distance %.4f, from the camera %zu frame(s) back.",
-                        s.held_near, s.chosen_camera);
+    if (++s.measured_frames % 1800 == 300)
+        logging::printf(logging::Level::info, logging::Channel::graphics, "World cover: near distance %.5f (%zu of %u points agree).", s.held_near,
+                        best_count, measure_columns);
 }
 
 bool record_cover(Shared& s) {
@@ -973,14 +946,14 @@ bool record_cover(Shared& s) {
     s.why = "recording failed";
     if (FAILED(s.allocators[at]->Reset()) || FAILED(s.list->Reset(s.allocators[at].Get(), nullptr))) return false;
     s.next_allocator = (at + 1) % s.allocators.size();
-    // This frame's camera, newest first, and the one the measurements chose to draw with.
+    // This frame's camera, newest first (the measurements try the first camera_candidates of them).
     {
         const auto& m = projector->m;
         for (std::size_t c = camera_candidates - 1; c > 0; --c) s.cameras[c] = s.cameras[c - 1];
         s.cameras[0] = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10], m[12], m[13], m[14]};
         s.cameras_known = std::min(s.cameras_known + 1, camera_candidates);
     }
-    const auto& camera = s.cameras[std::min(s.chosen_camera, s.cameras_known - 1)];
+    const auto& camera = s.cameras[0];
 
     Settings settings;
     std::vector<Clear> clear;
@@ -1378,8 +1351,6 @@ void release() noexcept {
         s.measure_pipeline.Reset();
         s.measure_waiting = {};
         s.cameras_known = 0;
-        s.scatter_known = false;
-        s.chosen_camera = 0;
         s.nears.clear();
         s.held_near = 0;
         s.measured_frames = 0;

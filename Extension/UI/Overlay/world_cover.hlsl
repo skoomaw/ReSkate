@@ -27,7 +27,7 @@ Texture2D<float2> last_cover : register(t2);
 // (world_cover.cpp's most_trail), the cameras ps_measure tries: each its right, up, back and eye.
 StructuredBuffer<float4> trail : register(t3);
 #define MOST_TRAIL 256
-#define CANDIDATES 3
+#define CANDIDATES 1
 SamplerState linear_clamp : register(s0);
 
 struct Vertex { float4 position : SV_Position; };
@@ -87,29 +87,22 @@ float measured_near() {
     return foot > 0 ? foot : measure_at(clears[0].xyz + float3(0, 1, 0), 0.12);
 }
 
-// Measurements for world_cover.cpp to choose the camera and the near distance by (a 32 x 3 target, read
-// back by the CPU): row y with candidate camera y, column x one point whose place in the world is known:
-// 0 the skater's foot, 1 their middle, 2 to 31 the ground round them at the foot's height (three rings).
-// Each is the near distance that point says the depth is over, or 0 off screen. With the right camera
-// they agree; with a camera a frame off they scatter. The CPU keeps the steady middle of them: the
-// distance measured at one pixel jumped as the skater's foot, board or shoe showed there, and the
-// trails and the places kept clear slid about with it (2026-11-11).
+// Measurements for world_cover.cpp to hold the near distance by (a 32 x 1 target, read back by the CPU):
+// each column a point up the skater's own body, from a little under their place to over their head, a
+// few centimetres either side of its middle. Each is the near distance that point says the depth is
+// over (its surface taken as 0.1 m nearer than its middle), or 0 off screen. Those that show the skater
+// agree; those that miss them show something further away. The CPU keeps the biggest group that agrees.
+// The distance measured at one pixel jumped as the foot, board or shoe showed there, and the trails
+// and the place kept clear slid about with it; points on the ground round the skater were no better:
+// the skater's place is not on the ground, and they measured the air (2026-11-11).
 float ps_measure(Vertex input) : SV_Target {
     const int2 p = int2(input.position.xy);
     if (clear_info.x < 1 || p.y >= CANDIDATES) return 0;
     const int at = 2 + MOST_TRAIL * 2 + p.y * 4;
-    float3 target = clears[0].xyz;
-    float nearer = 0;
-    if (p.x == 1) {
-        target += float3(0, 1, 0);
-        nearer = 0.12;
-    } else if (p.x >= 2) {
-        const uint k = (uint)(p.x - 2);
-        const float radius = k < 10 ? 0.5 : k < 20 ? 0.9 : 1.4;
-        const float angle = (k % 10u) * 0.6283185 + (k / 10u) * 0.31;
-        target += float3(cos(angle) * radius, 0, sin(angle) * radius);
-    }
-    return measure_with(trail[at].xyz, trail[at + 1].xyz, trail[at + 2].xyz, trail[at + 3].xyz, target, nearer);
+    const uint k = (uint)p.x;
+    const float side = (k < 16u ? -0.06 : 0.06);
+    const float3 target = clears[0].xyz + float3(0, -0.4 + (k % 16u) * 0.13, 0) + trail[at].xyz * side;
+    return measure_with(trail[at].xyz, trail[at + 1].xyz, trail[at + 2].xyz, trail[at + 3].xyz, target, 0.1);
 }
 
 float hash(float2 p) {
@@ -276,9 +269,12 @@ Output ps_main(Vertex input) {
     }
 
     // Distances are only real when measured: the trails and the places kept clear need them.
+    float pressed = 0;
     if (near_measured > 0 && cover > 0.002) {
-        // Trails: where a board went, the snow pressed away, filling back in as the trail fades.
-        cover *= 1 - trail_at(here) * 0.9;
+        // Trails: where a board went, the snow packed down, greyer and a little thinner, filling back in
+        // as the trail fades. Not taken away: the ground under it showed through blue (2026-11-11).
+        pressed = trail_at(here);
+        cover *= 1 - pressed * 0.2;
         // The places kept clear (the skater): upright cylinders over their feet, softened at the edge.
         // Inside one, the ground keeps its snow and whatever stands on it does not: the ground is the
         // lowest surface in a small ring round the pixel, and a point more than a centimetre or so over
@@ -306,7 +302,7 @@ Output ps_main(Vertex input) {
             // Well above the skater's own foot it is the skater, whatever is round it on screen: from a
             // low camera the shoulders and hair have only things further up or the sky round them, and
             // kept their snow (2026-11-11).
-            const float on_it = max(smoothstep(0, 0.004, over), smoothstep(0.3, 0.4, from.y));
+            const float on_it = max(smoothstep(0, 0.004, over), smoothstep(0.55, 0.65, from.y));
             cover *= 1 - inside * on_it;
         }
     }
@@ -348,7 +344,7 @@ Output ps_main(Vertex input) {
         around = max(around, luminance(scene.Load(int3(at, 0)).rgb));
     }
     light = max(light, around * 0.6);
-    float3 lit = colour_amount.rgb * light * shape.z;
+    float3 lit = colour_amount.rgb * light * shape.z * (1 - pressed * 0.35);
     if (extra.x > 0) {
         const float glint = hash(floor(steady.xz * 38.0) + floor(steady.y * 38.0));
         lit += light * extra.x * 6.0 * step(0.996, glint);
