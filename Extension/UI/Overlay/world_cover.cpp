@@ -1114,9 +1114,9 @@ bool record_cover(Shared& s) {
         original_rtv.load()(s.device, s.measure.Get(), &measure_view, measure_target);
         transition(list, s.measure.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
         list->SetPipelineState(s.measure_pipeline.Get());
-        const D3D12_VIEWPORT small{0, 0, static_cast<float>(measure_columns), static_cast<float>(camera_candidates), 0, 1};
+        const D3D12_VIEWPORT measure_viewport{0, 0, static_cast<float>(measure_columns), static_cast<float>(camera_candidates), 0, 1};
         const D3D12_RECT small_scissor{0, 0, static_cast<LONG>(measure_columns), static_cast<LONG>(camera_candidates)};
-        list->RSSetViewports(1, &small);
+        list->RSSetViewports(1, &measure_viewport);
         list->RSSetScissorRects(1, &small_scissor);
         list->OMSetRenderTargets(1, &measure_target, FALSE, nullptr);
         list->DrawInstanced(3, 1, 0, 0);

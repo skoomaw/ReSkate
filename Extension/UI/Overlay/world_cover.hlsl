@@ -104,9 +104,9 @@ float ps_measure(Vertex input) : SV_Target {
         target += float3(0, 1, 0);
         nearer = 0.12;
     } else if (p.x >= 2) {
-        const int k = p.x - 2;
+        const uint k = (uint)(p.x - 2);
         const float radius = k < 10 ? 0.5 : k < 20 ? 0.9 : 1.4;
-        const float angle = (k % 10) * 0.6283185 + (k / 10) * 0.31;
+        const float angle = (k % 10u) * 0.6283185 + (k / 10u) * 0.31;
         target += float3(cos(angle) * radius, 0, sin(angle) * radius);
     }
     return measure_with(trail[at].xyz, trail[at + 1].xyz, trail[at + 2].xyz, trail[at + 3].xyz, target, nearer);
