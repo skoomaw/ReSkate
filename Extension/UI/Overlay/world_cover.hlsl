@@ -123,7 +123,13 @@ Output ps_main(Vertex input) {
         // the screen, so its second difference is nothing; leaves, wires and distant edges are not flat,
         // their direction comes out differently each frame, and the cover drawn after the game's
         // anti-aliasing flickered on them (2026-11-10).
-        const float bend = max(abs(dl + dr - 2 * d), abs(du + dd - 2 * d)) / d;
+        // Each side apart, flat if either is: next to an edge one side is the other surface, and a pixel
+        // of ground there came out not flat and had no snow, a dark rim round everything (2026-11-11).
+        const float dl2 = depth_at(p - int2(2, 0)), dr2 = depth_at(p + int2(2, 0));
+        const float du2 = depth_at(p - int2(0, 2)), dd2 = depth_at(p + int2(0, 2));
+        const float bend_across = min(abs(dl2 - 2 * dl + d), abs(d - 2 * dr + dr2));
+        const float bend_along = min(abs(du2 - 2 * du + d), abs(d - 2 * dd + dd2));
+        const float bend = max(bend_across, bend_along) / d;
         cover *= 1 - smoothstep(0.0015, 0.006, bend);
     }
 
@@ -144,17 +150,32 @@ Output ps_main(Vertex input) {
     }
 
     // The places kept clear (the skater): upright cylinders over their feet, softened at the edge. Only
-    // when distances are measured, or the cylinder would be in the wrong place.
+    // when distances are measured, or the cylinder would be in the wrong place. Inside one, the ground
+    // keeps its snow and whatever stands on it does not: the ground is the lowest surface in a small
+    // ring round the pixel, and a point more than a centimetre or so over it is something on it (the
+    // deck, drawn almost on the ground, had a white rim of snow; clearing the ground too left a dark
+    // ring round the skater, 2026-11-10).
     if (near_measured > 0) {
         [unroll] for (int c = 0; c < 3; ++c) {
             if (c >= (int)clear_info.x) break;
             const float3 from = here - clears[c].xyz;
             const float radius = clears[c].w;
             const float height = c == 0 ? clear_info.y : c == 1 ? clear_info.z : clear_info.w;
-            // From a little over the ground the place stands on, not the ground itself: snow on the
-            // ground around the skater was cleared in a circle, a dark ring when they landed.
-            const float inside = (1 - smoothstep(radius * 0.75, radius, length(from.xz))) * step(0.06, from.y) * step(from.y, height);
-            cover *= 1 - inside;
+            const float across = 1 - smoothstep(radius * 0.75, radius, length(from.xz));
+            if (across <= 0 || from.y < -0.5 || from.y > height) continue;
+            float ground = here.y, ring = 0;
+            [unroll] for (int k = 0; k < 8; ++k) {
+                const float angle = k * 0.7853982;
+                const int2 at = p + int2(float2(cos(angle), sin(angle)) * max(back_height.w * 0.016, 6.0));
+                const float there = depth_at(at);
+                if (!(there > 0)) continue;
+                const float3 point_there = world_at(at, there, near_distance);
+                ground = min(ground, point_there.y);
+                ring = max(ring, length(point_there.xz - here.xz));
+            }
+            // A slope rises across the ring too: allow for one of up to about 1 in 7.
+            const float over = here.y - ground - max(0.01, ring * 0.15);
+            cover *= 1 - across * smoothstep(0, 0.01, over);
         }
     }
     out_.cover = float2(cover, view_distance);
@@ -179,6 +200,18 @@ Output ps_main(Vertex input) {
         light = max(light, luminance(scene.Load(int3(at, 0)).rgb));
     }
     light = lerp(light, base, 0.1);
+    // Not darker than about 60% of the snow round about: the picture still has the game's motion blur
+    // and smear in it, faint dark copies of moving things (and the skater's soft contact shadow) that
+    // showed on the snow as ghost outlines and a dark disc. Snow scatters light: its shadows are pale.
+    float around = light;
+    [unroll] for (int j = 0; j < 8; ++j) {
+        const float angle = j * 0.7853982 + 0.39;
+        const int2 at = clamp(p + int2(float2(cos(angle), sin(angle)) * back_height.w * 0.035), int2(0, 0), size - 1);
+        const float there = depth_at(at);
+        if (abs(there - d) > d * 0.06) continue;
+        around = max(around, luminance(scene.Load(int3(at, 0)).rgb));
+    }
+    light = max(light, around * 0.6);
     float3 lit = colour_amount.rgb * light * shape.z;
     if (extra.x > 0) {
         const float glint = hash(floor(steady.xz * 38.0) + floor(steady.y * 38.0));
