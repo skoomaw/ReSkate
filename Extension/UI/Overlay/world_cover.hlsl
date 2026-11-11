@@ -222,8 +222,6 @@ Output ps_main(Vertex input) {
         const float bend_across = min(abs(dl2 - 2 * dl + d), abs(d - 2 * dr + dr2));
         const float bend_along = min(abs(du2 - 2 * du + d), abs(d - 2 * dd + dd2));
         cover *= 1 - smoothstep(0.0015, 0.006, max(bend_across, bend_along) / d);
-        // Not on what is right in front of the camera: a wall it brushes past came out in streaks.
-        cover *= smoothstep(0.6, 1.2, view_distance);
     }
 
     // Steadier over time: last frame's cover where this point was then (off while this_frame_share in

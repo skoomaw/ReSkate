@@ -137,6 +137,13 @@ struct Shared {
     // The cover as drawn (how much, and how far): two, one read as last frame's and one written, swapped
     // each frame; and the camera it was drawn from.
     std::array<ComPtr<ID3D12Resource>, 2> history;
+    // What the GPU may still be using when it is replaced: kept until the fence passes the value the
+    // last list that could use it signals. Freed at once, a frame in flight read freed memory and the
+    // whole picture came out in stripes (2026-11-11).
+    std::vector<std::pair<UINT64, ComPtr<ID3D12Pageable>>> retiring;
+    // The format and size of the picture the cover goes into, the first time it goes into one: a final
+    // picture of another format is let be (no new copy, pipeline or shader compile in the middle of play).
+    DXGI_FORMAT chosen_format{DXGI_FORMAT_UNKNOWN};
     std::size_t history_at{};
     std::array<float, 12> last_camera{};
     std::uint64_t last_drawn_frame{~std::uint64_t{0}};
@@ -413,8 +420,10 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
             s.colour = composite->final_picture;
             s.colour_state = composite->final_before;
             s.colour_state_known = true;
-            s.colour_format = composite->final_format;
-            s.why = s.unsafe ? "a split or aliasing barrier, or another queue" : s.depth_elsewhere ? "the depth moved on another queue" : nullptr;
+            if (s.chosen_format == DXGI_FORMAT_UNKNOWN) s.chosen_format = composite->final_format;
+            s.colour_format = s.chosen_format;
+            s.why = s.unsafe ? "a split or aliasing barrier, or another queue" : s.depth_elsewhere ? "the depth moved on another queue"
+                  : composite->final_format != s.chosen_format ? "the final picture in another format" : nullptr;
             const bool drew = !s.why && record_cover(s);
             if (tracing.load()) {
                 if (s.quiet_batches) s.trace_lines.push_back(std::format("  ({} batch(es) with nothing traced)", s.quiet_batches));
@@ -484,6 +493,7 @@ void transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, D3D12
 
 bool build_pipeline(Shared& s, DXGI_FORMAT format) {
     if (s.pipeline && s.pipeline_format == format) return true;
+    if (s.pipeline) s.retiring.push_back({s.fence_value, s.pipeline});
     s.pipeline.Reset();
     if (!s.root) {
         D3D12_DESCRIPTOR_RANGE range{};
@@ -597,6 +607,7 @@ bool build_resources(Shared& s, const D3D12_RESOURCE_DESC& colour) {
         }
     }
     if (!s.picture || s.picture_desc.Width != colour.Width || s.picture_desc.Height != colour.Height || s.picture_desc.Format != colour.Format) {
+        if (s.picture) s.retiring.push_back({s.fence_value, s.picture});
         s.picture.Reset();
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -617,6 +628,7 @@ bool build_resources(Shared& s, const D3D12_RESOURCE_DESC& colour) {
         desc.Format = history_format;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         for (auto& h : s.history) {
+            if (h) s.retiring.push_back({s.fence_value, h});
             h.Reset();
             if (FAILED(s.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
                                                          IID_PPV_ARGS(&h)))) {
@@ -693,6 +705,11 @@ bool record_cover(Shared& s) {
         return false;
     }
     if (!build_resources(s, colour_desc) || !build_pipeline(s, s.colour_format)) return false;
+    // What was replaced and the GPU has finished with goes now.
+    if (s.fence) {
+        const UINT64 done = s.fence->GetCompletedValue();
+        std::erase_if(s.retiring, [&](const auto& r) { return r.first <= done; });
+    }
     // An allocator the GPU has finished with, or none this frame.
     const std::size_t at = s.next_allocator;
     if (s.fence->GetCompletedValue() < s.allocator_fence[at]) {
@@ -1049,6 +1066,8 @@ void release() noexcept {
         s.fence_value = 0;
         s.picture.Reset();
         for (auto& h : s.history) h.Reset();
+        s.retiring.clear(); // the overlay waits for the GPU before it tears down
+        s.chosen_format = DXGI_FORMAT_UNKNOWN;
         s.last_drawn_frame = ~std::uint64_t{0};
         s.views.Reset();
         s.targets.Reset();
