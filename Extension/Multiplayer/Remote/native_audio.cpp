@@ -52,6 +52,8 @@ struct State {
     // The local skater's updates as the game gave them, merged: the surface it is on.
     std::unique_ptr<NativeAudioFrame> as_given = std::make_unique<NativeAudioFrame>();
     std::atomic<std::uint32_t> surface_sound{}, surface_now{};
+    std::mutex surface_mutex;                  // guards surface_from
+    std::vector<std::uint32_t> surface_from;   // the slots that take surface_sound (empty: all)
     std::atomic<std::uint64_t> surface_read_at{};
     AudioCaptureBuffer queue;
     std::string capture_issue;
@@ -148,9 +150,12 @@ void submit_hook(Address handle, const NativeAudioFrame *frame) {
     NativeAudioFrame given = snapshot;
     const auto sound_word = s.surface_sound.load(std::memory_order_acquire);
     if (read && sound_word) {
+        std::lock_guard from_lock(s.surface_mutex);
         for (const auto offset : audio_material_offsets) {
             const auto word = audio_value<std::uint32_t>(snapshot, offset);
-            if (word) audio_put(snapshot, offset, (word & 0x3fU) | (sound_word & ~0x3fU));
+            const bool named = s.surface_from.empty() ||
+                std::find(s.surface_from.begin(), s.surface_from.end(), word & ~0x3fU) != s.surface_from.end();
+            if (word && named) audio_put(snapshot, offset, (word & 0x3fU) | (sound_word & ~0x3fU));
         }
         s.submit(handle, &snapshot);
     } else {
@@ -274,7 +279,18 @@ void prepare_audio_capture(Address base, const NativeFrame &local) noexcept {
         s.capture_issue = e.what();
     }
 }
-void set_surface_sound(std::uint32_t word) noexcept { state().surface_sound.store(word, std::memory_order_release); }
+void set_surface_sound(std::uint32_t word, std::span<const std::uint32_t> from) noexcept {
+    auto &s = state();
+    s.surface_sound.store(0, std::memory_order_release);
+    try {
+        std::lock_guard lock(s.surface_mutex);
+        s.surface_from.clear();
+        for (const auto f : from) s.surface_from.push_back(f & ~0x3fU);
+    } catch (...) {
+        return; // no list, no surface sound: never every surface for want of one
+    }
+    s.surface_sound.store(word, std::memory_order_release);
+}
 std::uint32_t local_surface() noexcept {
     auto &s = state();
     s.surface_read_at.store(now_us(), std::memory_order_relaxed);

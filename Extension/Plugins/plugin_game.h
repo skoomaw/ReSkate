@@ -789,9 +789,11 @@ public:
     // The surface the local skater's sounds are of (a physics material word, as the game gives it),
     // or nothing when none is known.
     virtual std::optional<std::uint32_t> skater_surface() { return std::nullopt; }
-    // The local skater's sounds as on that surface, wherever it is (nothing: each surface its own).
-    // One plugin at a time.
-    virtual std::string skater_surface_sound(std::string_view /*plugin*/, std::optional<std::uint32_t>) { return unavailable; }
+    // The local skater's sounds as on that surface, wherever it is (nothing: each surface its own), or
+    // only where it is on one of `from`. One plugin at a time.
+    virtual std::string skater_surface_sound(std::string_view /*plugin*/, std::optional<std::uint32_t>, std::vector<std::uint32_t> /*from*/ = {}) {
+        return unavailable;
+    }
     // ---- the session's authority (plugins' server copies) --------------------------------------------
     // Drops a player from the session; a chat line to everyone; one to one player (a dedicated
     // server's only: a lobby has no private chat); moves a player's skater (their game does the move).

@@ -55,18 +55,31 @@ struct WorldApi {
         return 1;
     }
     // ---- skater.control ------------------------------------------------------------------------
-    // surface_sound(word or nil): the local skater's sounds (rolling, landing, grinding) as on the
-    // surface that word names (from surface()), wherever the skater is; nil gives each surface its own.
+    static std::uint32_t surface_word(lua_State* L, int index) {
+        const double value = luaL_checknumber(L, index);
+        if (!(value >= 1 && value <= 4294967295.0) || value != std::floor(value)) luaL_argerror(L, index, "not a surface from reskate.skater.surface");
+        return static_cast<std::uint32_t>(value);
+    }
+    // surface_sound(word or nil[, from]): the local skater's sounds (rolling, landing, grinding) as on
+    // the surface that word names (from surface()), wherever the skater is, or only on the surfaces
+    // listed in from (up to 32); nil gives each surface its own.
     static int surface_sound(lua_State* L) {
         auto& plugin = plugin_of(L);
         need(L, plugin, "skater.control", "reskate.skater.surface_sound");
         std::optional<std::uint32_t> word;
-        if (!lua_isnoneornil(L, 1)) {
-            const double value = luaL_checknumber(L, 1);
-            if (!(value >= 1 && value <= 4294967295.0) || value != std::floor(value)) luaL_argerror(L, 1, "not a surface from reskate.skater.surface");
-            word = static_cast<std::uint32_t>(value);
+        if (!lua_isnoneornil(L, 1)) word = surface_word(L, 1);
+        std::vector<std::uint32_t> from;
+        if (!lua_isnoneornil(L, 2)) {
+            luaL_checktype(L, 2, LUA_TTABLE);
+            const int count = lua_objlen(L, 2);
+            if (count < 1 || count > 32) luaL_argerror(L, 2, "1 to 32 surfaces");
+            for (int i = 1; i <= count; ++i) {
+                lua_rawgeti(L, 2, i);
+                from.push_back(surface_word(L, lua_gettop(L)));
+                lua_pop(L, 1);
+            }
         }
-        return result(L, game_of(plugin).skater_surface_sound(plugin.id(), word));
+        return result(L, game_of(plugin).skater_surface_sound(plugin.id(), word, std::move(from)));
     }
     static int control(lua_State* L, const char* action) {
         auto& plugin = plugin_of(L);
