@@ -196,6 +196,7 @@ struct Shared {
     // The near distance each recent frame measured, and the steady middle of them (0: none yet).
     std::deque<float> nears;
     float held_near{};
+    unsigned near_disagreed{}; // frames in a row far from held_near
     std::uint64_t measured_frames{};
     std::size_t next_allocator{};
     ComPtr<ID3D12GraphicsCommandList> list;
@@ -891,7 +892,19 @@ void take_measurements(Shared& s, const std::uint8_t* rows) {
         if (to - from > best_count) best_from = from, best_count = to - from;
     }
     if (best_count < 5) return;
-    s.nears.push_back(values[best_from + best_count / 2]);
+    const float measured = values[best_from + best_count / 2];
+    // The game's near distance is about 0.06 m; ten times less was measured on something else and held,
+    // and the snow before the camera went wrong with it (2026-11-11).
+    if (measured < 0.02f || measured > 1.0f) return;
+    // A frame far from the distance held is let be, unless twenty in a row say so (a new camera): one
+    // that measured the wrong thing moved the whole cover for a moment, and the snow at the bottom of the
+    // screen thinned out with it (2026-11-11).
+    if (s.held_near > 0 && std::abs(measured - s.held_near) > s.held_near * 0.2f) {
+        if (++s.near_disagreed < 20) return;
+        s.nears.clear();
+    }
+    s.near_disagreed = 0;
+    s.nears.push_back(measured);
     while (s.nears.size() > 45) s.nears.pop_front();
     std::vector<float> sorted(s.nears.begin(), s.nears.end());
     const auto half = sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2);
@@ -1269,6 +1282,7 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
                 for (auto& handle : depth_handles) handle.store(0);
                 s.depth_state_known = false;
                 s.depth_width = s.depth_height = 0;
+                s.main_missed = 0;
                 s.colour = nullptr;
                 s.depth_copied_frame = ~std::uint64_t{0};
             }
@@ -1403,6 +1417,7 @@ void release() noexcept {
         s.cameras_known = 0;
         s.nears.clear();
         s.held_near = 0;
+        s.near_disagreed = 0;
         s.measured_frames = 0;
         s.depth_copied_frame = ~std::uint64_t{0};
         s.chosen_format = DXGI_FORMAT_UNKNOWN;
@@ -1576,6 +1591,9 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
         // 960x540 one at 1080p, 2026-11-10). A smaller one takes over only once the one known has
         // not been seen for 30 presents (the screen got smaller).
         if (s.main_depth && desc.Width * desc.Height <= UINT64{s.depth_width} * s.depth_height && s.main_missed < 30) return;
+        // None yet (the cover was resting): the screen's own size first; the 960x540 one came by first
+        // and the cover went into a picture of another size until the big one took over (2026-11-11).
+        if (!s.main_depth && desc.Width < s.width && s.main_missed < 30) return;
         // A new main depth buffer (a resize, a level): its views are looked for afresh.
         if (s.main_depth_hold) s.retiring.push_back({s.fence_value, s.main_depth_hold});
         s.main_depth_hold = resource;

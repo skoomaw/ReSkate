@@ -220,30 +220,43 @@ float trail_at(float3 here) {
     return pressed;
 }
 
-// Snow falling: flakes on a few shells round the camera, each nearer one bigger and faster, held still
-// in the world as the camera turns (they are placed by the direction of the ray), drifting down and
-// with the wind, and hidden behind whatever is nearer than their shell.
+// Snow falling: flakes on a few shells round the camera, each nearer one bigger and faster. Each flake
+// has a cell of its own on its shell, by direction from the camera (round it and up it), so it stays put
+// in the world as the camera turns; it slides down its shell as time goes, sways and drifts with the
+// wind, and is drawn out along its fall as a moving flake looks. Hidden behind whatever is nearer
+// than its shell. Flakes as blobs in a 3D grid were cut by the shell and showed only for the moment they
+// crossed it: a white dot, then nothing (2026-11-11).
 float3 snowfall(float3 colour, int2 p, float scene_distance, float exposure) {
     const float amount = extra.z;
     if (amount <= 0) return colour;
     const float3 ray = normalize(ray_of(p));
     const float seconds = extra.y;
+    const float round_way = atan2(ray.x, ray.z) / 6.2831853; // 0..1 round the camera
+    const float up_way = asin(clamp(ray.y, -1, 1));            // radians up
+    const float squeeze = max(cos(up_way), 0.2);               // round-the-camera cells are narrower up high
     float flakes = 0;
     [unroll] for (int k = 0; k < 5; ++k) {
         const float shell = 1.5 * pow(1.7, k);               // metres from the camera: 1.5, 2.6, 4.3, 7.4, 12.5
         if (shell > scene_distance) break;
         const float cells = 26.0 * pow(1.55, k);             // flakes across a radian: further shells, smaller flakes
-        const float fall = 1.1 * max(extra.w, 0.05) / shell * cells; // about 1.1 m/s down at the usual speed, in this shell's cells
-        const float3 drift = float3(0.35, 0, 0.2) / shell * cells;
-        float3 q = ray * cells + float3(0, fall, 0) * seconds + drift * seconds;
-        q.x += sin(seconds * 0.9 + q.y * 0.35) * 0.25;       // a little sway
-        const float3 cell = floor(q);
-        const float3 seed = hash3(cell + k * 17.0);
+        const float around = max(round(6.2831853 * cells), 1.0);
+        const float fall = 1.1 * max(extra.w, 0.05) / shell;  // radians a second down this shell (about 1.1 m/s)
+        const float drift = 0.25 / shell;                     // and across it, with the wind
+        const float2 q = float2(round_way * around + drift * cells * seconds, (up_way + fall * seconds) * cells);
+        const float2 cell = floor(q);
+        const float2 wrapped = float2(cell.x - around * floor(cell.x / around), cell.y);
+        const float3 seed = hash3(float3(wrapped, k * 17.0 + 0.5));
         if (seed.x > amount * 0.55) continue;                // how many cells hold a flake
-        const float3 centre = cell + 0.25 + hash3(cell + 3.1) * 0.5;
-        const float size = 0.11 + seed.y * 0.08;
-        const float touch = 1 - smoothstep(size * 0.35, size, length(q - centre));
-        flakes = max(flakes, touch * (1 - k * 0.12));
+        float2 centre = cell + 0.3 + seed.yz * 0.4;
+        centre.x += sin(seconds * (0.7 + seed.y * 0.8) + seed.z * 6.2831853) * 0.15; // its own sway
+        float2 off = q - centre;
+        off.x *= squeeze;
+        // Drawn out along its fall by about how far it moves in a frame, and a little more for the near ones.
+        const float stretch = 1.0 + min(fall * cells / 60.0 * 3.0, 3.0);
+        off.y /= stretch;
+        const float size = (0.07 + seed.y * 0.05) * (1.15 - k * 0.08);
+        const float touch = 1 - smoothstep(size * 0.3, size, length(off));
+        flakes = max(flakes, touch * (1 - k * 0.12) * (0.75 + 0.25 / stretch));
     }
     const float3 white = colour_amount.rgb * exposure * 1.6;
     return lerp(colour, white, saturate(flakes) * 0.85);
@@ -367,7 +380,11 @@ Output ps_main(Vertex input) {
             // Well above the skater's own foot it is the skater, whatever is round it on screen: from a
             // low camera the shoulders and hair have only things further up or the sky round them, and
             // kept their snow (2026-11-11).
-            const float on_it = max(smoothstep(0, 0.004, over), smoothstep(0.55, 0.65, from.y));
+            // Only in the middle of the place (the body itself): across all of it, a ramp rising ahead of the
+            // skater, and the ground before the camera when the distance measured was off, were taken for
+            // the skater and cleared, a dark circle (2026-11-11).
+            const float body = 1 - smoothstep(0.32, 0.42, length(from.xz));
+            const float on_it = max(smoothstep(0, 0.004, over), smoothstep(0.55, 0.65, from.y) * body);
             cover *= 1 - inside * on_it;
         }
     }
