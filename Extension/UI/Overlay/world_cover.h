@@ -41,6 +41,7 @@ struct Settings {
     float brightness{1.6f}; // 0.25..4: the cover's lit brightness against what it covers
     float breakup{0.35f};   // 0..1: how patchy its edge is (world-space noise)
     float sparkle{0.0f};    // 0..1: glints, as fresh snow has
+    float snowfall{0.0f};   // 0..1: snow falling in front of the world, none to heavy
 };
 
 // A place kept clear of the cover: an upright cylinder `radius` wide standing on `foot` (the world),
@@ -58,6 +59,10 @@ void clear() noexcept;
 // The first one also measures the depth's scale where its foot shows on screen, which the cylinders
 // need; while that foot is off screen the cover keeps nothing clear.
 void keep_clear(std::vector<Clear> places) noexcept;
+// Client thread: a point on a trail through the cover (where a board goes): the cover is pressed away
+// along the trail, `width` wide, and fills back in over `fade` seconds. At most 256 points are kept, the
+// oldest dropped first; a point closer than a few centimetres to the last is not added.
+void add_trail(const std::array<float, 3>& at, float width, float fade) noexcept;
 bool on() noexcept;
 // Client thread, every tick: whether the world is being played now (a level in play, no game menu
 // open). The cover is drawn only once that has held for two seconds, never on the front page, in

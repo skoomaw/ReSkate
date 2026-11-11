@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <format>
 #include <mutex>
 #include <map>
@@ -37,6 +38,10 @@ constexpr std::size_t most_clear = 3;
 // the snow (2026-11-10). The history is still written, for when the GPU's own camera is known.
 constexpr float this_frame_share = 1.0f;
 constexpr DXGI_FORMAT history_format = DXGI_FORMAT_R16G16_FLOAT;
+// Trails (add_trail): points kept, and the buffer each frame's are written to (world_cover.hlsl's t3:
+// two float4s of header, then two a point), one part of the upload buffer per command allocator.
+constexpr std::size_t most_trail = 256;
+constexpr UINT64 trail_slice = ((most_trail * 2 + 2) * 16 + 255) / 256 * 256;
 
 using CreateViewFn = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, const void*, D3D12_CPU_DESCRIPTOR_HANDLE);
 using CopyDescriptorsFn = void(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, UINT,
@@ -60,6 +65,12 @@ struct Asked {
     Settings settings;
     std::vector<Clear> clear;
     std::uint64_t clear_until{}; // keep_clear holds for 300 ms
+    struct TrailPoint {
+        std::array<float, 3> at{};
+        float width{}, fade{};
+        std::uint64_t when{};
+    };
+    std::deque<TrailPoint> trail;
 };
 Asked& asked() { static auto* value = new Asked; return *value; }
 std::atomic<bool> wanted{};
@@ -138,6 +149,8 @@ struct Shared {
     std::array<UINT64, 8> allocator_fence{};
     std::size_t next_allocator{};
     ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12Resource> trail_upload; // a slice a command allocator (trail_slice bytes each)
+    std::uint8_t* trail_cpu{};
     ComPtr<ID3D12Fence> fence;
     UINT64 fence_value{};
     bool failed{}, said_drawn{}, said_late{}, said_depth{}, said_colour{}, said_waiting{}, said_target{};
@@ -476,7 +489,7 @@ bool build_pipeline(Shared& s, DXGI_FORMAT format) {
         D3D12_DESCRIPTOR_RANGE range{};
         range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         range.NumDescriptors = 3; // t0 the picture, t1 the game's depth, t2 last frame's cover
-        std::array<D3D12_ROOT_PARAMETER, 2> parameters{};
+        std::array<D3D12_ROOT_PARAMETER, 3> parameters{};
         parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         parameters[0].Constants.Num32BitValues = constant_count;
         parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -484,6 +497,9 @@ bool build_pipeline(Shared& s, DXGI_FORMAT format) {
         parameters[1].DescriptorTable.NumDescriptorRanges = 1;
         parameters[1].DescriptorTable.pDescriptorRanges = &range;
         parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; // t3: the trails
+        parameters[2].Descriptor.ShaderRegister = 3;
+        parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         D3D12_STATIC_SAMPLER_DESC sampler{};
         sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -550,6 +566,24 @@ bool build_resources(Shared& s, const D3D12_RESOURCE_DESC& colour) {
         }
         s.list->SetName(L"ReSkate world cover");
         our_list.store(s.list.Get());
+        D3D12_HEAP_PROPERTIES upload{};
+        upload.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC bytes{};
+        bytes.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bytes.Width = trail_slice * s.allocators.size();
+        bytes.Height = 1;
+        bytes.DepthOrArraySize = 1;
+        bytes.MipLevels = 1;
+        bytes.SampleDesc.Count = 1;
+        bytes.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        void* cpu{};
+        if (FAILED(s.device->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &bytes, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                     IID_PPV_ARGS(&s.trail_upload))) ||
+            FAILED(s.trail_upload->Map(0, nullptr, &cpu)) || !cpu) {
+            say_failed("no buffer for the trails.");
+            return false;
+        }
+        s.trail_cpu = static_cast<std::uint8_t*>(cpu);
         D3D12_DESCRIPTOR_HEAP_DESC views{};
         views.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         views.NumDescriptors = 3;
@@ -671,11 +705,28 @@ bool record_cover(Shared& s) {
 
     Settings settings;
     std::vector<Clear> clear;
+    const std::uint64_t now = GetTickCount64();
+    // This frame's trails, into this command allocator's part of the upload buffer.
     {
+        auto* const out = reinterpret_cast<float*>(s.trail_cpu + at * trail_slice);
+        std::size_t count = 0;
+        std::array<float, 6> box{1e30f, 1e30f, -1e30f, -1e30f, 1e30f, -1e30f}; // min x, min z, max x, max z, min y, max y
         auto& a = asked();
         std::lock_guard lock(a.mutex);
         settings = a.settings;
-        if (GetTickCount64() < a.clear_until) clear = a.clear;
+        if (now < a.clear_until) clear = a.clear;
+        std::erase_if(a.trail, [&](const auto& t) { return now - t.when > static_cast<std::uint64_t>(t.fade * 1000); });
+        for (const auto& t : a.trail) {
+            const float strength = 1.0f - static_cast<float>(now - t.when) / (t.fade * 1000.0f);
+            float* const point = out + 8 + count * 8;
+            point[0] = t.at[0], point[1] = t.at[1], point[2] = t.at[2], point[3] = t.width;
+            point[4] = std::clamp(strength, 0.0f, 1.0f), point[5] = point[6] = point[7] = 0;
+            box = {std::min(box[0], t.at[0]), std::min(box[1], t.at[2]), std::max(box[2], t.at[0]), std::max(box[3], t.at[2]),
+                   std::min(box[4], t.at[1]), std::max(box[5], t.at[1])};
+            ++count;
+        }
+        out[0] = static_cast<float>(count), out[1] = box[0], out[2] = box[1], out[3] = box[2];
+        out[4] = box[3], out[5] = box[4], out[6] = box[5], out[7] = 0;
     }
     // Views: the picture's copy as the target's format reads it, and the game's depth as it is.
     const UINT view_step = s.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -733,7 +784,7 @@ bool record_cover(Shared& s) {
         m[12], m[13], m[14], 0.1f, // the near distance: it scales distances, not directions; only the noise's size depends on it
         settings.colour[0], settings.colour[1], settings.colour[2], settings.amount,
         settings.facing, settings.softness, settings.brightness, settings.breakup,
-        settings.sparkle, 0, 0, 0,
+        settings.sparkle, static_cast<float>(now % 3600000) / 1000.0f, settings.snowfall, 0,
         static_cast<float>(std::min(clear.size(), most_clear)), 0, 0, 0, // then each place's height, below
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // the places' feet and radii, below
         s.last_camera[0], s.last_camera[1], s.last_camera[2], have_last ? 1.0f : 0.0f,
@@ -754,6 +805,7 @@ bool record_cover(Shared& s) {
     list->SetPipelineState(s.pipeline.Get());
     list->SetGraphicsRoot32BitConstants(0, constant_count, constants.data(), 0);
     list->SetGraphicsRootDescriptorTable(1, s.views->GetGPUDescriptorHandleForHeapStart());
+    list->SetGraphicsRootShaderResourceView(2, s.trail_upload->GetGPUVirtualAddress() + at * trail_slice);
     const D3D12_VIEWPORT viewport{0, 0, width, height, 0, 1};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(colour_desc.Width), static_cast<LONG>(colour_desc.Height)};
     list->RSSetViewports(1, &viewport);
@@ -796,6 +848,19 @@ void set(const Settings& settings) noexcept {
     wanted.store(true);
 }
 void clear() noexcept { wanted.store(false); }
+void add_trail(const std::array<float, 3>& at, float width, float fade) noexcept {
+    try {
+        auto& a = asked();
+        std::lock_guard lock(a.mutex);
+        if (!a.trail.empty()) {
+            const auto& last = a.trail.back().at;
+            const float dx = at[0] - last[0], dy = at[1] - last[1], dz = at[2] - last[2];
+            if (dx * dx + dy * dy + dz * dz < 0.05f * 0.05f) return;
+        }
+        a.trail.push_back({at, width, fade, GetTickCount64()});
+        while (a.trail.size() > most_trail) a.trail.pop_front();
+    } catch (...) {}
+}
 void keep_clear(std::vector<Clear> places) noexcept {
     try {
         if (places.size() > most_clear) places.resize(most_clear);
@@ -976,6 +1041,8 @@ void release() noexcept {
         // The overlay waits for the GPU before it tears down; ours went on the same queue.
         our_list.store(nullptr);
         s.list.Reset();
+        s.trail_upload.Reset();
+        s.trail_cpu = nullptr;
         for (auto& allocator : s.allocators) allocator.Reset();
         s.allocator_fence = {};
         s.fence.Reset();

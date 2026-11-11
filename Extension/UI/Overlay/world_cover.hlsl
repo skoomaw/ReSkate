@@ -1,8 +1,8 @@
 // A cover over the world's upward-facing surfaces (world_cover.cpp, reskate.effects.cover), drawn into
-// the finished scene just before the game puts it on the screen with its UI. One full-screen triangle;
-// t0 is a copy of that picture, t1 the game's own depth for it (reversed: 1 near, 0 far), t2 the
-// cover as it was last frame (how much, and how far away), which this pass writes again to its second
-// target for the next frame.
+// the finished scene just before the game puts it on the screen with its UI, and snow falling in front
+// of it. One full-screen triangle; t0 is a copy of that picture, t1 the game's own depth for it
+// (reversed: 1 near, 0 far), t2 the cover as it was last frame (how much, and how far away), which
+// this pass writes again to its second target, and t3 the trails through the cover (a buffer).
 
 cbuffer constants : register(b0) {
     float4 right_focal;   // the camera's right (world), and its focal length in pixels
@@ -11,7 +11,7 @@ cbuffer constants : register(b0) {
     float4 eye_near;      // where it is, and the near distance the reversed depth is over when not measured
     float4 colour_amount; // the cover's colour, and how much of a covered surface it hides
     float4 shape;         // facing, softness, brightness, breakup
-    float4 extra;         // sparkle, unused, unused, unused
+    float4 extra;         // sparkle, seconds (for the falling snow), how much snow falls (0 to 1), unused
     float4 clear_info;    // how many places are kept clear (0 to 3), then each one's height above its foot
     float4 clears[3];     // each: its foot in the world, and its radius
     float4 last_right;    // last frame's camera (as this frame's above), and whether last frame's cover is there
@@ -22,6 +22,9 @@ cbuffer constants : register(b0) {
 Texture2D<float4> scene : register(t0);
 Texture2D<float> depth : register(t1);
 Texture2D<float2> last_cover : register(t2);
+// [0] = (points, the box they lie in: min x, min z, max x), [1] = (max z, min y, max y, -), then two a
+// point, oldest first: (where, width), (how strong it still is, 0 to 1, -, -, -).
+StructuredBuffer<float4> trail : register(t3);
 SamplerState linear_clamp : register(s0);
 
 struct Vertex { float4 position : SV_Position; };
@@ -42,34 +45,48 @@ float depth_at(int2 p) {
     return depth.Load(int3(p, 0));
 }
 
-// The point the pixel shows, in the world. Reversed, infinite depth: distance = near / depth.
-float3 world_at(int2 p, float d, float near_distance) {
+// The ray through a pixel, in the world (not of unit length: one along the view).
+float3 ray_of(float2 p) {
     const float a = (p.x + 0.5 - up_width.w * 0.5) / right_focal.w;
     const float b = (back_height.w * 0.5 - (p.y + 0.5)) / right_focal.w;
-    const float3 ray = right_focal.xyz * a + up_width.xyz * b - back_height.xyz;
-    return eye_near.xyz + ray * (near_distance / max(d, 1e-7));
+    return right_focal.xyz * a + up_width.xyz * b - back_height.xyz;
 }
 
-// The near distance the game's depth is over, measured where the first place kept clear stands: its
-// distance along the view, times the depth drawn where its foot shows on screen (depth = near /
-// distance). 0 when it cannot be measured (no place kept clear, or its foot is off screen or behind).
-// The camera's own near plane is not known, and without it distances are only right in proportion.
-float measured_near() {
-    if (clear_info.x < 1) return 0;
-    const float3 to = clears[0].xyz - eye_near.xyz;
+// The point the pixel shows, in the world. Reversed, infinite depth: distance = near / depth.
+float3 world_at(int2 p, float d, float near_distance) {
+    return eye_near.xyz + ray_of(p) * (near_distance / max(d, 1e-7));
+}
+
+// The near distance the game's depth is over, measured on the first place kept clear (the skater): its
+// distance along the view, times the depth drawn where it shows on screen (depth = near / distance).
+// Where its foot shows first; where its middle shows (a metre up, its surface a little nearer) when the
+// foot is off screen, as in a close view. 0 when neither shows. The camera's own near plane is not
+// known, and without it distances are only right in proportion.
+float measure_at(float3 target, float nearer) {
+    const float3 to = target - eye_near.xyz;
     const float along_view = dot(to, -back_height.xyz);
     if (along_view < 0.3) return 0;
     const float2 at = float2(up_width.w * 0.5 + dot(to, right_focal.xyz) * right_focal.w / along_view,
                              back_height.w * 0.5 - dot(to, up_width.xyz) * right_focal.w / along_view);
     if (any(at < 0) || at.x >= up_width.w || at.y >= back_height.w) return 0;
     const float there = depth_at(int2(at));
-    return there > 0 ? along_view * there : 0;
+    return there > 0 ? (along_view - nearer) * there : 0;
+}
+float measured_near() {
+    if (clear_info.x < 1) return 0;
+    const float foot = measure_at(clears[0].xyz, 0);
+    return foot > 0 ? foot : measure_at(clears[0].xyz + float3(0, 1, 0), 0.12);
 }
 
 float hash(float2 p) {
     p = frac(p * float2(123.34, 456.21));
     p += dot(p, p + 45.32);
     return frac(p.x * p.y);
+}
+float3 hash3(float3 p) {
+    p = frac(p * float3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return frac((p.xxy + p.yxx) * p.zyx);
 }
 float noise(float2 p) {
     const float2 i = floor(p), f = frac(p);
@@ -79,6 +96,78 @@ float noise(float2 p) {
 
 float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
+// How much a trail has pressed the cover away at this point: 0 none, 1 all of it.
+float trail_at(float3 here) {
+    const float4 head = trail[0];
+    const int points = (int)head.x;
+    if (points < 2) return 0;
+    const float4 box = trail[1];
+    if (here.x < head.y - 1 || here.z < head.z - 1 || here.x > head.w + 1 || here.z > box.x + 1 || here.y < box.y - 1 || here.y > box.z + 1)
+        return 0;
+    float pressed = 0;
+    float4 a = trail[2];
+    float strength_a = trail[3].x;
+    for (int i = 1; i < points; ++i) {
+        const float4 b = trail[2 + i * 2];
+        const float strength_b = trail[3 + i * 2].x;
+        const float2 along = b.xz - a.xz;
+        const float length_squared = dot(along, along);
+        // Two points far apart are not one trail (a teleport, a respawn).
+        if (length_squared < 4.0 && strength_a > 0 && strength_b > 0) {
+            const float t = saturate(dot(here.xz - a.xz, along) / max(length_squared, 1e-6));
+            const float2 nearest = a.xz + along * t;
+            const float off = length(here.xz - nearest);
+            const float height = lerp(a.y, b.y, t);
+            const float half_width = b.w * 0.5;
+            if (abs(here.y - height) < 0.4) {
+                const float strength = lerp(strength_a, strength_b, t);
+                pressed = max(pressed, (1 - smoothstep(half_width * 0.6, half_width, off)) * strength);
+            }
+        }
+        a = b;
+        strength_a = strength_b;
+    }
+    return pressed;
+}
+
+// Snow falling: flakes on a few shells round the camera, each nearer one bigger and faster, held still
+// in the world as the camera turns (they are placed by the direction of the ray), drifting down and
+// with the wind, and hidden behind whatever is nearer than their shell.
+float3 snowfall(float3 colour, int2 p, float scene_distance, float exposure) {
+    const float amount = extra.z;
+    if (amount <= 0) return colour;
+    const float3 ray = normalize(ray_of(p));
+    const float seconds = extra.y;
+    float flakes = 0;
+    [unroll] for (int k = 0; k < 5; ++k) {
+        const float shell = 1.5 * pow(1.7, k);               // metres from the camera: 1.5, 2.6, 4.3, 7.4, 12.5
+        if (shell > scene_distance) break;
+        const float cells = 26.0 * pow(1.55, k);             // flakes across a radian: further shells, smaller flakes
+        const float fall = 1.1 / shell * cells;              // about 1.1 m/s down, in this shell's cells
+        const float3 drift = float3(0.35, 0, 0.2) / shell * cells;
+        float3 q = ray * cells + float3(0, fall, 0) * seconds + drift * seconds;
+        q.x += sin(seconds * 0.9 + q.y * 0.35) * 0.25;       // a little sway
+        const float3 cell = floor(q);
+        const float3 seed = hash3(cell + k * 17.0);
+        if (seed.x > amount * 0.55) continue;                // how many cells hold a flake
+        const float3 centre = cell + 0.25 + hash3(cell + 3.1) * 0.5;
+        const float size = 0.11 + seed.y * 0.08;
+        const float touch = 1 - smoothstep(size * 0.35, size, length(q - centre));
+        flakes = max(flakes, touch * (1 - k * 0.12));
+    }
+    const float3 white = colour_amount.rgb * exposure * 1.6;
+    return lerp(colour, white, saturate(flakes) * 0.85);
+}
+
+// The picture's brightness as a whole, for the flakes: a few points over the screen.
+float exposure_now() {
+    float sum = 0;
+    [unroll] for (int y = 1; y <= 3; ++y)
+        [unroll] for (int x = 1; x <= 3; ++x)
+            sum += luminance(scene.Load(int3(int2(up_width.w * x / 4, back_height.w * y / 4), 0)).rgb);
+    return max(sum / 9, 1e-4);
+}
+
 Output ps_main(Vertex input) {
     Output out_;
     const int2 p = int2(input.position.xy);
@@ -86,16 +175,21 @@ Output ps_main(Vertex input) {
     out_.colour = under;
     out_.cover = float2(0, 0);
     const float d = depth_at(p);
-    // The sky, and anything at the near plane (the camera inside something).
-    if (!(d > 0.0 && d < 1.0)) return out_;
     const float near_measured = measured_near();
     const float near_distance = near_measured > 0 ? near_measured : eye_near.w;
+    const float exposure = exposure_now();
+    // The sky, and anything at the near plane (the camera inside something): snow falls in front of it.
+    if (!(d > 0.0 && d < 1.0)) {
+        out_.colour.rgb = snowfall(under.rgb, p, d >= 1.0 ? 0 : 1e9, exposure);
+        return out_;
+    }
     const float3 here = world_at(p, d, near_distance);
+    const float view_distance = dot(here - eye_near.xyz, -back_height.xyz);
+    const float scene_distance = length(here - eye_near.xyz);
     // The patchiness, from where the point is at a scale that never changes: with the measured one it
     // jumped whenever the measurement came and went (the skater's feet in and out of view), and the
     // snow flashed on and off with it (2026-11-10).
     const float3 steady = world_at(p, d, eye_near.w);
-    const float view_distance = dot(here - eye_near.xyz, -back_height.xyz);
     // The surface's direction from its neighbours: on each axis the one nearer in depth, so an edge
     // against something further away does not bend it.
     const float dl = depth_at(p - int2(1, 0)), dr = depth_at(p + int2(1, 0));
@@ -119,24 +213,22 @@ Output ps_main(Vertex input) {
         const float facing = shape.x + (patch - 0.5) * shape.w * 0.6;
         const float softness = max(shape.y, 0.01);
         cover = smoothstep(facing - softness, facing + softness, normal.y) * colour_amount.w;
-        // Only on surfaces flat across their neighbours. A plane's reversed depth changes evenly across
-        // the screen, so its second difference is nothing; leaves, wires and distant edges are not flat,
-        // their direction comes out differently each frame, and the cover drawn after the game's
-        // anti-aliasing flickered on them (2026-11-10).
-        // Each side apart, flat if either is: next to an edge one side is the other surface, and a pixel
-        // of ground there came out not flat and had no snow, a dark rim round everything (2026-11-11).
+        // Only on surfaces flat across their neighbours, each side apart, flat if either is. A plane's
+        // reversed depth changes evenly across the screen, so its second difference is nothing; leaves,
+        // wires and distant edges are not flat, and the cover flickered on them. Next to an edge one
+        // side is the other surface, and judged together the ground there had a dark rim (2026-11-11).
         const float dl2 = depth_at(p - int2(2, 0)), dr2 = depth_at(p + int2(2, 0));
         const float du2 = depth_at(p - int2(0, 2)), dd2 = depth_at(p + int2(0, 2));
         const float bend_across = min(abs(dl2 - 2 * dl + d), abs(d - 2 * dr + dr2));
         const float bend_along = min(abs(du2 - 2 * du + d), abs(d - 2 * dd + dd2));
-        const float bend = max(bend_across, bend_along) / d;
-        cover *= 1 - smoothstep(0.0015, 0.006, bend);
+        cover *= 1 - smoothstep(0.0015, 0.006, max(bend_across, bend_along) / d);
+        // Not on what is right in front of the camera: a wall it brushes past came out in streaks.
+        cover *= smoothstep(0.6, 1.2, view_distance);
     }
 
-    // Steadier over time: last frame's cover where this point was then, from last frame's camera, so a
-    // pixel that comes out covered one frame and not the next settles in between instead of flickering.
-    // Not where something else was there last frame (its distance then does not match), nor off screen.
-    if (last_right.w > 0) {
+    // Steadier over time: last frame's cover where this point was then (off while this_frame_share in
+    // world_cover.cpp is 1: the camera it is found with can be a frame apart from the GPU's).
+    if (last_right.w > 0 && last_up.w < 1) {
         const float3 to = here - last_eye.xyz;
         const float then = dot(to, -last_back.xyz);
         if (then > 0.05) {
@@ -149,20 +241,22 @@ Output ps_main(Vertex input) {
         }
     }
 
-    // The places kept clear (the skater): upright cylinders over their feet, softened at the edge. Only
-    // when distances are measured, or the cylinder would be in the wrong place. Inside one, the ground
-    // keeps its snow and whatever stands on it does not: the ground is the lowest surface in a small
-    // ring round the pixel, and a point more than a centimetre or so over it is something on it (the
-    // deck, drawn almost on the ground, had a white rim of snow; clearing the ground too left a dark
-    // ring round the skater, 2026-11-10).
-    if (near_measured > 0) {
+    // Distances are only real when measured: the trails and the places kept clear need them.
+    if (near_measured > 0 && cover > 0.002) {
+        // Trails: where a board went, the snow pressed away, filling back in as the trail fades.
+        cover *= 1 - trail_at(here) * 0.9;
+        // The places kept clear (the skater): upright cylinders over their feet, softened at the edge.
+        // Inside one, the ground keeps its snow and whatever stands on it does not: the ground is the
+        // lowest surface in a small ring round the pixel, and a point more than a centimetre or so over
+        // it is something on it (the deck, drawn almost on the ground, had a white rim of snow;
+        // clearing the ground too left a dark ring round the skater, 2026-11-10).
         [unroll] for (int c = 0; c < 3; ++c) {
             if (c >= (int)clear_info.x) break;
             const float3 from = here - clears[c].xyz;
             const float radius = clears[c].w;
             const float height = c == 0 ? clear_info.y : c == 1 ? clear_info.z : clear_info.w;
-            const float across = 1 - smoothstep(radius * 0.75, radius, length(from.xz));
-            if (across <= 0 || from.y < -0.5 || from.y > height) continue;
+            const float inside = 1 - smoothstep(radius * 0.75, radius, length(from.xz));
+            if (inside <= 0 || from.y < -0.5 || from.y > height) continue;
             float ground = here.y, ring = 0;
             [unroll] for (int k = 0; k < 8; ++k) {
                 const float angle = k * 0.7853982;
@@ -175,20 +269,24 @@ Output ps_main(Vertex input) {
             }
             // A slope rises across the ring too: allow for one of up to about 1 in 7.
             const float over = here.y - ground - max(0.01, ring * 0.15);
-            cover *= 1 - across * smoothstep(0, 0.01, over);
+            cover *= 1 - inside * smoothstep(0, 0.01, over);
         }
     }
     out_.cover = float2(cover, view_distance);
-    if (cover <= 0.002) return out_;
+    if (cover <= 0.002) {
+        out_.colour.rgb = snowfall(under.rgb, p, scene_distance, exposure);
+        return out_;
+    }
 
     // Lit as what it covers is lit, without its colour: so a shadow on the ground is a shadow on the
     // snow, and the game's exposure holds for both. Not from the pixel alone, or the ground's own
     // pattern (paving joints, cracks) shows through as grey: the brightest of a few close samples on the
-    // same surface (as deep as this pixel), so dark joints vanish under the snow. Close, and the same
-    // surface only: a wide ring of samples copied the skater and shadow edges onto the snow around them
-    // eight times over (2026-11-10).
+    // same plane as this pixel, so dark joints vanish under the snow. Close, and the same plane only: a
+    // wide ring copied the skater onto the snow round them, and samples only as deep as this pixel took
+    // in the deck lying a centimetre over the ground and copied its white rim round it (2026-11-11).
     const int2 size = int2(up_width.w, back_height.w);
     const float reach = max(back_height.w * 0.006, 2.0);
+    const float flat = max(0.004, view_distance * 0.002);
     float light = luminance(under.rgb);
     const float base = light;
     [unroll] for (int i = 0; i < 12; ++i) {
@@ -196,7 +294,7 @@ Output ps_main(Vertex input) {
         const float2 way = float2(cos(angle), sin(angle)) * reach * ((i & 1) ? 1.0 : 0.5);
         const int2 at = clamp(p + int2(way), int2(0, 0), size - 1);
         const float there = depth_at(at);
-        if (abs(there - d) > d * 0.02) continue; // another surface: the skater, a pole, a kerb's edge
+        if (!(there > 0) || abs(dot(world_at(at, there, near_distance) - here, normal)) > flat) continue;
         light = max(light, luminance(scene.Load(int3(at, 0)).rgb));
     }
     light = lerp(light, base, 0.1);
@@ -208,7 +306,7 @@ Output ps_main(Vertex input) {
         const float angle = j * 0.7853982 + 0.39;
         const int2 at = clamp(p + int2(float2(cos(angle), sin(angle)) * back_height.w * 0.035), int2(0, 0), size - 1);
         const float there = depth_at(at);
-        if (abs(there - d) > d * 0.06) continue;
+        if (!(there > 0) || abs(dot(world_at(at, there, near_distance) - here, normal)) > flat * 5) continue;
         around = max(around, luminance(scene.Load(int3(at, 0)).rgb));
     }
     light = max(light, around * 0.6);
@@ -217,6 +315,6 @@ Output ps_main(Vertex input) {
         const float glint = hash(floor(steady.xz * 38.0) + floor(steady.y * 38.0));
         lit += light * extra.x * 6.0 * step(0.996, glint);
     }
-    out_.colour = float4(lerp(under.rgb, lit, cover), under.a);
+    out_.colour = float4(snowfall(lerp(under.rgb, lit, cover), p, scene_distance, exposure), under.a);
     return out_;
 }

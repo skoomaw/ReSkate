@@ -1280,8 +1280,13 @@ public:
         world_cover::Settings s;
         s.colour = cover->colour;
         s.amount = cover->amount, s.facing = cover->facing, s.softness = cover->softness;
-        s.brightness = cover->brightness, s.breakup = cover->breakup, s.sparkle = cover->sparkle;
+        s.brightness = cover->brightness, s.breakup = cover->breakup, s.sparkle = cover->sparkle, s.snowfall = cover->snowfall;
         world_cover::set(s);
+        return {};
+    }
+    std::string world_cover_trail(std::string_view plugin, const CoverTrail& point) override {
+        if (coverer_ != plugin) return "this plugin has no cover on the world";
+        world_cover::add_trail(point.at, point.width, point.fade);
         return {};
     }
     std::string world_cover_clear(std::string_view plugin, const std::vector<CoverClear>& places) override {
