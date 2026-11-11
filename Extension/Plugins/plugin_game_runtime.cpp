@@ -1982,9 +1982,10 @@ public:
         const auto word = multiplayer::local_surface();
         return word ? std::optional(word) : std::nullopt;
     }
-    std::string skater_surface_sound(std::string_view plugin, std::optional<std::uint32_t> word, std::vector<std::uint32_t> from) override {
+    std::vector<std::uint32_t> skater_surfaces() override { return multiplayer::local_surfaces(); }
+    std::string skater_surface_sound(std::string_view plugin, std::optional<std::uint32_t> word, std::vector<std::uint32_t> from, std::uint32_t fields) override {
         if (!surfacer_.empty() && surfacer_ != plugin) return "another plugin sets the skater's surface sound";
-        multiplayer::set_surface_sound(word.value_or(0), from);
+        multiplayer::set_surface_sound(word.value_or(0), from, fields);
         if (word) surfacer_ = std::string(plugin);
         else surfacer_.clear();
         return {};

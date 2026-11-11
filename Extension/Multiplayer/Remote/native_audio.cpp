@@ -51,7 +51,7 @@ struct State {
     std::unique_ptr<NativeAudioFrame> accumulated = std::make_unique<NativeAudioFrame>();
     // The local skater's updates as the game gave them, merged: the surface it is on.
     std::unique_ptr<NativeAudioFrame> as_given = std::make_unique<NativeAudioFrame>();
-    std::atomic<std::uint32_t> surface_sound{}, surface_now{};
+    std::atomic<std::uint32_t> surface_sound{}, surface_now{}, surface_fields{~0U};
     std::mutex surface_mutex;                  // guards surface_from
     std::vector<std::uint32_t> surface_from;   // the slots that take surface_sound (empty: all)
     std::atomic<std::uint64_t> surface_read_at{};
@@ -151,7 +151,10 @@ void submit_hook(Address handle, const NativeAudioFrame *frame) {
     const auto sound_word = s.surface_sound.load(std::memory_order_acquire);
     if (read && sound_word) {
         std::lock_guard from_lock(s.surface_mutex);
-        for (const auto offset : audio_material_offsets) {
+        const auto fields = s.surface_fields.load(std::memory_order_acquire);
+        for (std::size_t field = 0; field < audio_material_offsets.size(); ++field) {
+            if (!(fields & (1U << field))) continue;
+            const auto offset = audio_material_offsets[field];
             const auto word = audio_value<std::uint32_t>(snapshot, offset);
             const bool named = s.surface_from.empty() ||
                 std::find(s.surface_from.begin(), s.surface_from.end(), word & ~0x3fU) != s.surface_from.end();
@@ -281,9 +284,10 @@ void prepare_audio_capture(Address base, const NativeFrame &local) noexcept {
         s.capture_issue = e.what();
     }
 }
-void set_surface_sound(std::uint32_t word, std::span<const std::uint32_t> from) noexcept {
+void set_surface_sound(std::uint32_t word, std::span<const std::uint32_t> from, std::uint32_t fields) noexcept {
     auto &s = state();
     s.surface_sound.store(0, std::memory_order_release);
+    s.surface_fields.store(fields, std::memory_order_release);
     try {
         std::lock_guard lock(s.surface_mutex);
         s.surface_from.clear();
@@ -297,6 +301,15 @@ std::uint32_t local_surface() noexcept {
     auto &s = state();
     s.surface_read_at.store(now_us(), std::memory_order_relaxed);
     return s.local_component.load(std::memory_order_acquire) ? s.surface_now.load(std::memory_order_acquire) : 0;
+}
+std::vector<std::uint32_t> local_surfaces() {
+    auto &s = state();
+    s.surface_read_at.store(now_us(), std::memory_order_relaxed);
+    if (!s.local_component.load(std::memory_order_acquire)) return {};
+    std::lock_guard lock(s.mutex);
+    std::vector<std::uint32_t> out;
+    for (const auto offset : audio_material_offsets) out.push_back(audio_value<std::uint32_t>(*s.as_given, offset));
+    return out;
 }
 bool surface_wanted() noexcept {
     const auto &s = state();

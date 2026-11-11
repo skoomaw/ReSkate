@@ -411,9 +411,12 @@ struct FakeGame final : Game {
     std::optional<std::uint32_t> surface_now, surface_set;
     std::vector<std::uint32_t> surface_from;
     std::optional<std::uint32_t> skater_surface() override { return surface_now; }
-    std::string skater_surface_sound(std::string_view, std::optional<std::uint32_t> word, std::vector<std::uint32_t> from) override {
+    std::uint32_t surface_fields{};
+    std::vector<std::uint32_t> skater_surfaces() override { return surface_now ? std::vector<std::uint32_t>(18, *surface_now) : std::vector<std::uint32_t>{}; }
+    std::string skater_surface_sound(std::string_view, std::optional<std::uint32_t> word, std::vector<std::uint32_t> from, std::uint32_t fields) override {
         surface_set = word;
         surface_from = std::move(from);
+        surface_fields = fields;
         return {};
     }
     std::vector<std::pair<std::string, bool>> chosen_variants; // each choice, and whether it went in now
@@ -1517,6 +1520,9 @@ void the_skater_surface_sound_can_be_read_and_set() {
         local grass = reskate.skater.surface()
         assert(grass == 0x1234c1, tostring(grass))
         assert(reskate.skater.surface_sound(grass))
+        assert(#reskate.skater.surfaces() == 18 and reskate.skater.surfaces()[18] == grass)
+        assert(reskate.skater.surface_sound(grass, nil, {1, 3}))
+        assert(not pcall(reskate.skater.surface_sound, grass, nil, {19}), "fields are 1 to 18")
         assert(reskate.skater.surface_sound(grass, {0x2340, 0x5680}))
         assert(not pcall(reskate.skater.surface_sound, grass, {}), "an empty list names nothing")
         assert(not pcall(reskate.skater.surface_sound, grass, {0.5}), "a fraction in the list")
@@ -1526,6 +1532,7 @@ void the_skater_surface_sound_can_be_read_and_set() {
     running(host, "surface-sound", environment);
     check(environment.fake.surface_set == 0x1234c1u, "surface_sound passes the surface word on");
     check(environment.fake.surface_from == std::vector<std::uint32_t>{0x2340, 0x5680}, "surface_sound passes the surfaces it is for on");
+    check(environment.fake.surface_fields == ~0U, "surface_sound without fields is for every field");
     TestEnvironment denied_environment;
     Host denied(denied_environment, Side::client);
     denied.apply({script("surface-denied", R"(
