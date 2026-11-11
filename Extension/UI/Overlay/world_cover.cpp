@@ -197,6 +197,7 @@ struct Shared {
     std::deque<float> nears;
     float held_near{};
     unsigned near_disagreed{}; // frames in a row far from held_near
+    bool tread_said{};         // the deck's place said once since a tread was asked for
     std::uint64_t measured_frames{};
     std::size_t next_allocator{};
     ComPtr<ID3D12GraphicsCommandList> list;
@@ -1013,8 +1014,10 @@ bool record_cover(Shared& s) {
             float* const to = out + (most_trail * 2 + 2 + camera_candidates * 4) * 4;
             std::fill(to, to + tread_floats4 * 4, 0.0f);
             const auto deck = tread ? board_pose::deck_in_world() : std::nullopt;
+            if (!tread) s.tread_said = false;
             // Now and then, where the deck is against the skater: a tread far from them is drawn nowhere.
-            if (tread && s.frame % 3600 == 300) {
+            if (tread && (!s.tread_said || s.frame % 3600 == 300)) {
+                s.tread_said = true;
                 if (!deck) logging::write(logging::Level::info, logging::Channel::graphics, "World cover: a tread is asked for, and no deck has been drawn.");
                 else {
                     float apart = -1;
@@ -1241,13 +1244,19 @@ void keep_clear(std::vector<Clear> places) noexcept {
 }
 void allow(bool playing) noexcept {
     const std::uint64_t now = GetTickCount64();
+    static std::uint64_t last_allowed{}; // when the cover was last allowed
     if (!playing) {
         playing_since = 0;
         allowed.store(false);
         return;
     }
-    if (!playing_since) playing_since = now;
-    allowed.store(now - playing_since >= 2000);
+    // Back within a few seconds of being drawn (a teleport, a menu opened and closed): at once. The
+    // wait is for the front page and a level loading, which take longer; a teleport took the snow
+    // away for two seconds (2026-11-11).
+    if (!playing_since) playing_since = last_allowed && now - last_allowed < 5000 ? now - 2000 : now;
+    const bool yes = now - playing_since >= 2000;
+    if (yes) last_allowed = now;
+    allowed.store(yes);
 }
 bool on() noexcept { return wanted.load(); }
 
