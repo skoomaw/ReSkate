@@ -54,8 +54,8 @@ constexpr std::size_t most_trail = 256; // world_cover.hlsl's MOST_TRAIL
 // (their agreement differed by noise), and every change moved the whole cover by a frame (2026-11-11).
 constexpr std::size_t camera_candidates = 1;
 constexpr std::size_t camera_floats = 12; // right, up, back, eye
-// Then the deck's tread (set_tread): five float4s (world_cover.hlsl's tread_over).
-constexpr std::size_t tread_floats4 = 5;
+// Then the deck's tread (set_tread): seven float4s (world_cover.hlsl's tread_over).
+constexpr std::size_t tread_floats4 = 7;
 constexpr UINT64 trail_slice = ((most_trail * 2 + 2 + camera_candidates * 4 + tread_floats4) * 16 + 255) / 256 * 256;
 // The measurements: one row a candidate camera, a column a point (ps_measure), read back by the CPU.
 constexpr UINT measure_columns = 32;
@@ -920,10 +920,13 @@ bool record_cover(Shared& s) {
     s.why = "nothing to draw into";
     if (s.failed || !s.colour || !s.main_depth) return false;
     // Our copy of the game's depth, taken this frame as soon as the game had finished it.
-    if (s.depth_copied_frame != s.frame || !s.depth_copy) {
+    // Else the last frame's, still there: a frame now and then had none (the depth not readable when
+    // its batch went), and the snow went off for it; a frame's difference is far less to see (2026-11-11).
+    if (!s.depth_copy || (s.depth_copied_frame != s.frame && s.depth_copied_frame + 1 != s.frame)) {
         s.why = "no copy of this frame's depth";
         return false;
     }
+    if (s.depth_copied_frame != s.frame) ++s.outcomes["drawn with the last frame's depth"];
     const auto colour_desc = s.colour->GetDesc();
     s.why = "the picture and depth differ in size, shape or state";
     if (colour_desc.Width != s.depth_width || colour_desc.Height != s.depth_height) return false;
@@ -1019,17 +1022,29 @@ bool record_cover(Shared& s) {
                         const float dx = deck->position[0] - clear[0].foot[0], dy = deck->position[1] - clear[0].foot[1], dz = deck->position[2] - clear[0].foot[2];
                         apart = std::sqrt(dx * dx + dy * dy + dz * dz);
                     }
+                    const auto& q = deck->rotation;
+                    const float up_y = 1 - 2 * (q[0] * q[0] + q[2] * q[2]); // the deck's up, how upright
                     logging::printf(logging::Level::info, logging::Channel::graphics,
-                                    "World cover: the tread's deck is at (%.2f, %.2f, %.2f), %.2f m from the skater's place, drawn %llu ms ago.",
-                                    deck->position[0], deck->position[1], deck->position[2], apart,
+                                    "World cover: the tread's deck is at (%.2f, %.2f, %.2f), %.2f m from the skater's place, its up %.2f of upright, drawn %llu ms ago.",
+                                    deck->position[0], deck->position[1], deck->position[2], apart, up_y,
                                     static_cast<unsigned long long>(now - deck->at_ms));
                 }
             }
             if (tread && deck && now - deck->at_ms < 250) {
-                to[0] = deck->rotation[0], to[1] = deck->rotation[1], to[2] = deck->rotation[2], to[3] = deck->rotation[3];
+                // The deck's axes in the world: across (x), up (y) and along it (z), as its rig has them.
+                const auto axis = [&](float x, float y, float z) {
+                    const auto& q = deck->rotation;
+                    const float tx = 2 * (q[1] * z - q[2] * y), ty = 2 * (q[2] * x - q[0] * z), tz = 2 * (q[0] * y - q[1] * x);
+                    return std::array<float, 3>{x + q[3] * tx + (q[1] * tz - q[2] * ty), y + q[3] * ty + (q[2] * tx - q[0] * tz),
+                                                z + q[3] * tz + (q[0] * ty - q[1] * tx)};
+                };
+                const auto across = axis(1, 0, 0), up = axis(0, 1, 0), along = axis(0, 0, 1);
+                to[0] = across[0], to[1] = across[1], to[2] = across[2], to[3] = 0;
+                to[20] = up[0], to[21] = up[1], to[22] = up[2], to[23] = 0;
+                to[24] = along[0], to[25] = along[1], to[26] = along[2], to[27] = 0;
                 to[4] = deck->position[0], to[5] = deck->position[1], to[6] = deck->position[2], to[7] = 1;
                 to[8] = tread->colour[0], to[9] = tread->colour[1], to[10] = tread->colour[2], to[11] = tread->opacity;
-                to[12] = tread->width * 0.5f, to[13] = tread->length * 0.5f, to[14] = tread->height, to[15] = 0.03f; // a scale a little off moves points along the view
+                to[12] = tread->width * 0.5f, to[13] = tread->length * 0.5f, to[14] = tread->height, to[15] = 0.08f; // how far the scene may be from the underside and still be it (the depth's scale is a few per cent off)
                 to[16] = tread->spacing, to[17] = tread->ridge;
             }
         }

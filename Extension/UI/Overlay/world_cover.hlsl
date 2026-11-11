@@ -151,29 +151,35 @@ float median_light(int2 p, float3 here, float3 normal, float near_distance, floa
     return v[16 - found + found / 2];
 }
 
-// A tread over the underside of the local skater's deck (world_cover.cpp: five float4s after the
-// cameras): the deck's rotation, its place (w: 1 when on), the tread's colour and opacity, its half
-// width, half length, height from the deck's bone and how thick a slice of the deck counts as its
-// underside, then the ridges' spacing and width. Only where the surface faces the deck's down.
-float3 tread_over(float3 shown, float3 here, float3 normal) {
+// A tread over the underside of the local skater's deck (world_cover.cpp: seven float4s after the
+// cameras): the deck's across axis, its place (w: 1 when on), the tread's colour and opacity, its half
+// width, half length, height from the deck's bone and how far the scene may differ, the ridges' spacing
+// and width, then the deck's up and along axes. Each pixel's ray meets the plane of the underside where
+// it meets it: exact, whatever the depth's scale. The depth only says whether something is in front of
+// it. Points worked out from the depth were off by several centimetres (the scale is measured to a
+// few per cent), more than the deck is thick, and nothing was ever on its underside (2026-11-11).
+float3 tread_over(float3 shown, int2 p, float scene_distance) {
     const int at = 2 + MOST_TRAIL * 2 + CANDIDATES * 4;
     const float4 place = trail[at + 1];
     if (place.w < 0.5) return shown;
-    const float4 q = trail[at];
+    const float3 across = trail[at].xyz, up = trail[at + 5].xyz, along = trail[at + 6].xyz;
     const float4 look = trail[at + 2];
     const float4 size = trail[at + 3];
     const float4 ridges = trail[at + 4];
-    // Into the deck's frame: the conjugate rotation of the offset.
-    const float3 v = here - place.xyz;
-    const float3 u = -q.xyz;
-    const float3 t = 2 * cross(u, v);
-    const float3 local = v + q.w * t + cross(u, t);
-    const float3 tn = 2 * cross(u, normal);
-    const float3 local_normal = normal + q.w * tn + cross(u, tn);
-    if (local_normal.y > -0.5 || abs(local.y - size.z) > size.w) return shown;
+    const float3 dir = normalize(ray_of(p));
+    // The underside is seen only from below it: the ray going up through the deck's plane.
+    const float facing = dot(dir, up);
+    if (facing < 0.05) return shown;
+    const float3 plane = place.xyz + up * size.z;
+    const float t = dot(plane - eye_near.xyz, up) / facing;
+    if (t < 0.05) return shown;
+    // What the pixel shows is the underside only when it is about as far: nearer is in front of it.
+    if (abs(t - scene_distance) > max(0.12, scene_distance * size.w)) return shown;
+    const float3 hit = eye_near.xyz + dir * t - place.xyz;
+    const float2 local = float2(dot(hit, across), dot(hit, along));
     // A rounded patch: straight along the middle, round at its ends.
     const float straight = max(size.y - size.x, 0);
-    const float2 off = float2(local.x, max(abs(local.z) - straight, 0));
+    const float2 off = float2(local.x, max(abs(local.y) - straight, 0));
     const float edge = length(off) - size.x;
     if (edge > 0.004) return shown;
     const float inside = 1 - smoothstep(-0.004, 0.004, edge);
@@ -340,12 +346,12 @@ Output ps_main(Vertex input) {
     float3 normal = cross(along, across);
     const float length_squared = dot(normal, normal);
     float cover = 0;
-    float3 shown = under.rgb; // the picture, with the deck's tread over it
+    float3 shown = tread_over(under.rgb, p, scene_distance); // the picture, with the deck's tread over it
     if (length_squared > 1e-20) {
         normal *= rsqrt(length_squared);
         // Facing the camera: the side the pixel is seen from.
         if (dot(normal, eye_near.xyz - here) < 0) normal = -normal;
-        if (near_measured > 0) shown = tread_over(shown, here, normal);
+
         // Patchy where it thins: large, slow noise over the ground, in the world, so it stays put.
         const float patch = noise(steady.xz * 0.45) * 0.65 + noise(steady.xz * 1.9) * 0.35;
         const float facing = shape.x + (patch - 0.5) * shape.w * 0.6;
