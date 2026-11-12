@@ -331,19 +331,6 @@ struct FakeGame final : Game {
     std::pair<bool, std::uint64_t> effects_state() override { return {effects_ready, effect_epoch}; }
     // One plugin's world cover at a time, as the real one.
     std::string coverer;
-    std::string world_cover_trail(std::string_view plugin, const CoverTrail& point) override {
-        if (coverer != plugin) return "this plugin has no cover on the world";
-        calls.push_back(std::format("trail {} {:.1f} {:.1f} {:.1f} w{:.2f} f{:.1f}", plugin, point.at[0], point.at[1], point.at[2], point.width, point.fade));
-        return {};
-    }
-    std::string world_cover_tread(std::string_view plugin, std::optional<BoardTread> t) override {
-        if (coverer != plugin) return t ? "this plugin has no cover on the world" : std::string{};
-        if (!t) calls.push_back(std::format("tread {} none", plugin));
-        else
-            calls.push_back(std::format("tread {} {:.2f} {:.2f} {:.2f} o{:.2f} w{:.2f} l{:.2f} h{:.3f} s{:.3f} r{:.2f}", plugin, t->colour[0], t->colour[1],
-                                        t->colour[2], t->opacity, t->width, t->length, t->height, t->spacing, t->ridge));
-        return {};
-    }
     std::string world_cover_clear(std::string_view plugin, const std::vector<CoverClear>& places) override {
         if (coverer != plugin) return "this plugin has no cover on the world";
         std::string line = std::format("keep clear {} {}", plugin, places.size());
@@ -408,14 +395,10 @@ struct FakeGame final : Game {
     std::optional<MarkerEvents> marker_events(std::string_view plugin) override {
         return std::exchange(marker_feed[std::string(plugin)], {});
     }
-    std::optional<std::uint32_t> surface_now, surface_set;
-    std::vector<std::uint32_t> surface_from;
-    std::optional<std::uint32_t> skater_surface() override { return surface_now; }
+    std::optional<std::uint32_t> surface_set;
     std::uint32_t surface_fields{};
-    std::vector<std::uint32_t> skater_surfaces() override { return surface_now ? std::vector<std::uint32_t>(18, *surface_now) : std::vector<std::uint32_t>{}; }
-    std::string skater_surface_sound(std::string_view, std::optional<std::uint32_t> word, std::vector<std::uint32_t> from, std::uint32_t fields) override {
+    std::string skater_surface_sound(std::string_view, std::optional<std::uint32_t> word, std::uint32_t fields) override {
         surface_set = word;
-        surface_from = std::move(from);
         surface_fields = fields;
         return {};
     }
@@ -1512,32 +1495,22 @@ Candidate script(const std::string& id, const std::string& main, const std::stri
 
 void running(const Host& host, std::string_view id, const TestEnvironment& environment);
 
-void the_skater_surface_sound_can_be_read_and_set() {
+void the_skater_surface_sound_is_set_for_some_fields() {
     TestEnvironment environment;
-    environment.fake.surface_now = 0x1234c1u;
     Host host(environment, Side::client);
     host.apply({script("surface-sound", R"(
-        local grass = reskate.skater.surface()
-        assert(grass == 0x1234c1, tostring(grass))
-        assert(reskate.skater.surface_sound(grass))
-        assert(#reskate.skater.surfaces() == 18 and reskate.skater.surfaces()[18] == grass)
-        assert(reskate.skater.surface_sound(grass, nil, {1, 3}))
-        assert(not pcall(reskate.skater.surface_sound, grass, nil, {19}), "fields are 1 to 18")
-        assert(reskate.skater.surface_sound(grass, {0x2340, 0x5680}))
-        assert(not pcall(reskate.skater.surface_sound, grass, {}), "an empty list names nothing")
-        assert(not pcall(reskate.skater.surface_sound, grass, {0.5}), "a fraction in the list")
+        assert(reskate.skater.surface_sound(0xd60, {1, 3}))
+        assert(not pcall(reskate.skater.surface_sound, 0xd60, {19}), "fields are 1 to 18")
         assert(not pcall(reskate.skater.surface_sound, 0.5), "a fraction is no surface")
         assert(not pcall(reskate.skater.surface_sound, -1), "a negative is no surface")
-    )", R"("skater.read", "skater.control")")});
+    )", R"("skater.control")")});
     running(host, "surface-sound", environment);
-    check(environment.fake.surface_set == 0x1234c1u, "surface_sound passes the surface word on");
-    check(environment.fake.surface_from == std::vector<std::uint32_t>{0x2340, 0x5680}, "surface_sound passes the surfaces it is for on");
-    check(environment.fake.surface_fields == ~0U, "surface_sound without fields is for every field");
+    check(environment.fake.surface_set == 0xd60u && environment.fake.surface_fields == 0b101u,
+          "surface_sound passes the surface word and its fields on");
     TestEnvironment denied_environment;
     Host denied(denied_environment, Side::client);
     denied.apply({script("surface-denied", R"(
         assert(not pcall(reskate.skater.surface_sound, 7), "needs skater.control")
-        assert(not pcall(reskate.skater.surface), "needs skater.read")
     )")});
     running(denied, "surface-denied", denied_environment);
     check(!denied_environment.fake.surface_set, "a plugin without skater.control set no surface sound");
@@ -4761,16 +4734,6 @@ void plugins_cover_the_world() {
         for i = 1, 4 do four[i] = {position = vector.create(i, 0, 0)} end
         assert(not pcall(reskate.effects.keep_clear, four), "at most three places")
         assert(reskate.effects.keep_clear(nil))
-        assert(reskate.effects.trail({position = vector.create(1, 0, 2)}))
-        assert(reskate.effects.trail({position = vector.create(1, 0, 3), width = 0.3, fade = 12}))
-        assert(not pcall(reskate.effects.trail, {position = vector.create(0, 0, 0), fade = 100}), "a fade is 0.5 to 60 s")
-        assert(not pcall(reskate.effects.trail, {width = 0.2}), "a trail point has a position")
-        assert(reskate.effects.tread({}))
-        assert(reskate.effects.tread({colour = {r = 0.2, g = 0.3, b = 0.4}, opacity = 0.4, width = 0.2, length = 0.5, height = 0.01, spacing = 0.02, ridge = 0.3}))
-        assert(not pcall(reskate.effects.tread, {opacity = 2}), "an opacity is 0 to 1")
-        assert(not pcall(reskate.effects.tread, {spacing = 1}), "a spacing is 0.004 to 0.1")
-        assert(not pcall(reskate.effects.tread, {colour = {r = 1}}), "a colour has three channels")
-        assert(reskate.effects.tread(nil))
         reskate.log("covered")
     )"}});
     host.apply({snow});
@@ -4782,35 +4745,26 @@ void plugins_cover_the_world() {
           "The cover as asked, and its defaults\n" + environment.all());
     check(game.called("keep clear snow 2 (1.0 2.0 3.0 r0.60 h2.0) (4.0 5.0 6.0 r1.50 h3.0)") && game.called("keep clear snow 0"),
           "Places kept clear of the cover, with their defaults, and none\n" + environment.all());
-    check(game.called("trail snow 1.0 0.0 2.0 w0.25 f10.0") && game.called("trail snow 1.0 0.0 3.0 w0.30 f12.0"),
-          "Trail points through the cover, with their defaults\n" + environment.all());
-    check(game.called("tread snow 0.08 0.08 0.09 o0.55 w0.19 l0.62 h-0.006 s0.016 r0.50") &&
-              game.called("tread snow 0.20 0.30 0.40 o0.40 w0.20 l0.50 h0.010 s0.020 r0.30") && game.called("tread snow none"),
-          "A tread on the deck as asked, its defaults, and none\n" + environment.all());
     // A second plugin is told whose cover it is; nil from it does not end the first one's.
     host.apply({snow, package("sand", {{manifest_file, manifest(R"("effects")")}, {"plugin/main.lua", R"(
         local ok, why = reskate.effects.cover({colour = {r = 0.8, g = 0.7, b = 0.5}})
         reskate.log(tostring(ok) .. " " .. tostring(why))
         local kept, not_why = reskate.effects.keep_clear({{position = vector.create(0, 0, 0)}})
         reskate.log("keep " .. tostring(kept) .. " " .. tostring(not_why))
-        local treaded, tread_why = reskate.effects.tread({})
-        reskate.log("tread " .. tostring(treaded) .. " " .. tostring(tread_why))
         assert(reskate.effects.cover(nil))
     )"}})});
     ticks(host, environment, 1);
     check(environment.logged("[sand] nil snow has the world's cover") && !game.called("cover sand none") && game.coverer == "snow",
           "One plugin's cover at a time\n" + environment.all());
     check(environment.logged("[sand] keep nil this plugin has no cover on the world"), "Only the cover's plugin keeps places clear of it");
-    check(environment.logged("[sand] tread nil this plugin has no cover on the world"), "Only the cover's plugin draws a tread with it");
     // Without the permission it is refused.
     host.apply({snow, package("sneaky", {{manifest_file, manifest()}, {"plugin/main.lua", R"(
         reskate.log(tostring(pcall(reskate.effects.cover, {})) .. " " .. tostring(pcall(reskate.effects.cover, nil)) .. " " ..
-            tostring(pcall(reskate.effects.keep_clear, {})) .. " " .. tostring(pcall(reskate.world.controls)) .. " " ..
-            tostring(pcall(reskate.effects.trail, {position = vector.create(0, 0, 0)})) .. " " .. tostring(pcall(reskate.effects.tread, {})))
+            tostring(pcall(reskate.effects.keep_clear, {})) .. " " .. tostring(pcall(reskate.world.controls)))
     )"}})});
     ticks(host, environment, 1);
-    check(environment.logged("[sneaky] false false false false false false"),
-          "effects is needed for a cover, its clear places, trails and tread, world.environment to read the world controls\n" + environment.all());
+    check(environment.logged("[sneaky] false false false false"),
+          "effects is needed for a cover and its clear places, world.environment to read the world controls\n" + environment.all());
     check(game.coverer == "snow", "A refused plugin does not take the cover");
     // Unloading the plugin ends its cover.
     host.apply({});
@@ -7264,7 +7218,7 @@ int main() {
         std::filesystem::remove_all(scratch);
         run(a_manifest_says_what_a_plugin_is);
         run(a_variant_can_wait_for_the_next_launch);
-        run(the_skater_surface_sound_can_be_read_and_set);
+        run(the_skater_surface_sound_is_set_for_some_fields);
         run(ui_value_reservations_enforce_limits_and_collisions);
         run(plugins_publish_only_their_own_ui_values);
         run(plugin_approval_follows_the_plugins_own_files);

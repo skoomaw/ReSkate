@@ -2,7 +2,7 @@
 // the finished scene just before the game puts it on the screen with its UI, and snow falling in front
 // of it. One full-screen triangle; t0 is a copy of that picture, t1 the game's own depth for it
 // (reversed: 1 near, 0 far: our copy of it, which ps_depth takes), t2 the cover as it was last frame (how much, and how far away), which
-// this pass writes again to its second target, and t3 the trails through the cover (a buffer).
+// this pass writes again to its second target, and t3 the cameras ps_measure tries (a buffer).
 
 cbuffer constants : register(b0) {
     float4 right_focal;   // the camera's right (world), and its focal length in pixels
@@ -22,11 +22,8 @@ cbuffer constants : register(b0) {
 Texture2D<float4> scene : register(t0);
 Texture2D<float> depth : register(t1);
 Texture2D<float2> last_cover : register(t2);
-// [0] = (points, the box they lie in: min x, min z, max x), [1] = (max z, min y, max y, -), then two a
-// point, oldest first: (where, width), (how strong it still is, 0 to 1, -, -, -). After the most points
-// (world_cover.cpp's most_trail), the cameras ps_measure tries: each its right, up, back and eye.
-StructuredBuffer<float4> trail : register(t3);
-#define MOST_TRAIL 256
+// The cameras ps_measure tries (world_cover.cpp's camera_candidates): each its right, up, back and eye.
+StructuredBuffer<float4> cameras : register(t3);
 #define CANDIDATES 1
 SamplerState linear_clamp : register(s0);
 
@@ -92,17 +89,17 @@ float measured_near() {
 // few centimetres either side of its middle. Each is the near distance that point says the depth is
 // over (its surface taken as 0.1 m nearer than its middle), or 0 off screen. Those that show the skater
 // agree; those that miss them show something further away. The CPU keeps the biggest group that agrees.
-// The distance measured at one pixel jumped as the foot, board or shoe showed there, and the trails
-// and the place kept clear slid about with it; points on the ground round the skater were no better:
+// The distance measured at one pixel jumped as the foot, board or shoe showed there, and the place
+// kept clear slid about with it; points on the ground round the skater were no better:
 // the skater's place is not on the ground, and they measured the air (2026-11-11).
 float ps_measure(Vertex input) : SV_Target {
     const int2 p = int2(input.position.xy);
     if (clear_info.x < 1 || p.y >= CANDIDATES) return 0;
-    const int at = 2 + MOST_TRAIL * 2 + p.y * 4;
+    const int at = p.y * 4;
     const uint k = (uint)p.x;
     const float side = (k < 16u ? -0.06 : 0.06);
-    const float3 target = clears[0].xyz + float3(0, -0.4 + (k % 16u) * 0.13, 0) + trail[at].xyz * side;
-    return measure_with(trail[at].xyz, trail[at + 1].xyz, trail[at + 2].xyz, trail[at + 3].xyz, target, 0.1);
+    const float3 target = clears[0].xyz + float3(0, -0.4 + (k % 16u) * 0.13, 0) + cameras[at].xyz * side;
+    return measure_with(cameras[at].xyz, cameras[at + 1].xyz, cameras[at + 2].xyz, cameras[at + 3].xyz, target, 0.1);
 }
 
 float hash(float2 p) {
@@ -149,81 +146,6 @@ float median_light(int2 p, float3 here, float3 normal, float near_distance, floa
         }
     }
     return v[16 - found + found / 2];
-}
-
-// A tread over the underside of the local skater's deck (world_cover.cpp: seven float4s after the
-// cameras): the deck's across axis, its place (w: 1 when on), the tread's colour and opacity, its half
-// width, half length, height from the deck's bone and how far the scene may differ, the ridges' spacing
-// and width, then the deck's up and along axes. Each pixel's ray meets the plane of the underside where
-// it meets it: exact, whatever the depth's scale. The depth only says whether something is in front of
-// it. Points worked out from the depth were off by several centimetres (the scale is measured to a
-// few per cent), more than the deck is thick, and nothing was ever on its underside (2026-11-11).
-float3 tread_over(float3 shown, int2 p, float scene_distance) {
-    const int at = 2 + MOST_TRAIL * 2 + CANDIDATES * 4;
-    const float4 place = trail[at + 1];
-    if (place.w < 0.5) return shown;
-    const float3 across = trail[at].xyz, up = trail[at + 5].xyz, along = trail[at + 6].xyz;
-    const float4 look = trail[at + 2];
-    const float4 size = trail[at + 3];
-    const float4 ridges = trail[at + 4];
-    const float3 dir = normalize(ray_of(p));
-    // The underside is seen only from below it: the ray going up through the deck's plane.
-    const float facing = dot(dir, up);
-    if (facing < 0.05) return shown;
-    const float3 plane = place.xyz + up * size.z;
-    const float t = dot(plane - eye_near.xyz, up) / facing;
-    if (t < 0.05) return shown;
-    // What the pixel shows is the underside only when it is about as far: nearer is in front of it.
-    if (abs(t - scene_distance) > max(0.12, scene_distance * size.w)) return shown;
-    const float3 hit = eye_near.xyz + dir * t - place.xyz;
-    const float2 local = float2(dot(hit, across), dot(hit, along));
-    // A rounded patch: straight along the middle, round at its ends.
-    const float straight = max(size.y - size.x, 0);
-    const float2 off = float2(local.x, max(abs(local.y) - straight, 0));
-    const float edge = length(off) - size.x;
-    if (edge > 0.004) return shown;
-    const float inside = 1 - smoothstep(-0.004, 0.004, edge);
-    // Ridges along the deck, across its width: raised (solid) and between them thinner.
-    const float phase = frac(local.x / max(ridges.x, 0.002));
-    const float ridge = smoothstep(0, 0.12, phase) * (1 - smoothstep(ridges.y, ridges.y + 0.12, phase));
-    const float amount = look.w * inside * lerp(0.55, 1.0, ridge);
-    // Lit as the deck there is lit: its brightness, without its colour.
-    const float3 lit = look.rgb * max(luminance(shown), 1e-4) * 2.5 * lerp(0.8, 1.15, ridge);
-    return lerp(shown, lit, saturate(amount));
-}
-
-// How much a trail has pressed the cover away at this point: 0 none, 1 all of it.
-float trail_at(float3 here) {
-    const float4 head = trail[0];
-    const int points = (int)head.x;
-    if (points < 2) return 0;
-    const float4 box = trail[1];
-    if (here.x < head.y - 1 || here.z < head.z - 1 || here.x > head.w + 1 || here.z > box.x + 1 || here.y < box.y - 1 || here.y > box.z + 1)
-        return 0;
-    float pressed = 0;
-    float4 a = trail[2];
-    float strength_a = trail[3].x;
-    for (int i = 1; i < points; ++i) {
-        const float4 b = trail[2 + i * 2];
-        const float strength_b = trail[3 + i * 2].x;
-        const float2 along = b.xz - a.xz;
-        const float length_squared = dot(along, along);
-        // Two points far apart are not one trail (a teleport, a respawn).
-        if (length_squared < 4.0 && strength_a > 0 && strength_b > 0) {
-            const float t = saturate(dot(here.xz - a.xz, along) / max(length_squared, 1e-6));
-            const float2 nearest = a.xz + along * t;
-            const float off = length(here.xz - nearest);
-            const float height = lerp(a.y, b.y, t);
-            const float half_width = b.w * 0.5;
-            if (abs(here.y - height) < 0.4) {
-                const float strength = lerp(strength_a, strength_b, t);
-                pressed = max(pressed, (1 - smoothstep(half_width * 0.6, half_width, off)) * strength);
-            }
-        }
-        a = b;
-        strength_a = strength_b;
-    }
-    return pressed;
 }
 
 // Snow falling, in the world: a grid of cells over the world that falls and drifts with the wind, each
@@ -346,7 +268,7 @@ Output ps_main(Vertex input) {
     float3 normal = cross(along, across);
     const float length_squared = dot(normal, normal);
     float cover = 0;
-    float3 shown = tread_over(under.rgb, p, scene_distance); // the picture, with the deck's tread over it
+    const float3 shown = under.rgb;
     if (length_squared > 1e-20) {
         normal *= rsqrt(length_squared);
         // Facing the camera: the side the pixel is seen from.
@@ -383,13 +305,8 @@ Output ps_main(Vertex input) {
         }
     }
 
-    // Distances are only real when measured: the trails and the places kept clear need them.
-    float pressed = 0;
+    // Distances are only real when measured: the places kept clear need them.
     if (near_measured > 0 && cover > 0.002) {
-        // Trails: where a board went, the snow packed down, greyer and a little thinner, filling back in
-        // as the trail fades. Not taken away: the ground under it showed through blue (2026-11-11).
-        pressed = trail_at(here);
-        cover *= 1 - pressed * 0.2;
         // The places kept clear (the skater): upright cylinders over their feet, softened at the edge.
         // Inside one, the ground keeps its snow and whatever stands on it does not: the ground is the
         // lowest surface in a small ring round the pixel, and a point more than a centimetre or so over
@@ -446,7 +363,7 @@ Output ps_main(Vertex input) {
     // and smear in it, faint dark copies of moving things (and the skater's soft contact shadow) that
     // showed on the snow as ghost outlines and a dark disc. Snow scatters light: its shadows are pale.
     const float light = max(lerp(close, own, 0.1), wide * 0.6);
-    float3 lit = colour_amount.rgb * light * shape.z * (1 - pressed * 0.35);
+    float3 lit = colour_amount.rgb * light * shape.z;
     if (extra.x > 0) {
         const float glint = hash(floor(steady.xz * 38.0) + floor(steady.y * 38.0));
         lit += light * extra.x * 6.0 * step(0.996, glint);

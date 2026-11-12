@@ -44,75 +44,34 @@ struct WorldApi {
         else lua_pushstring(L, skater_state_name(*now));
         return 1;
     }
-    // surface(): the surface the local skater's sounds are of now, a physics material word as the game
-    // gives it (whatever surface sound is set); nil when none is known.
-    static int surface(lua_State* L) {
-        auto& plugin = plugin_of(L);
-        need(L, plugin, "skater.read", "reskate.skater.surface");
-        const auto word = game_of(plugin).skater_surface();
-        if (!word) lua_pushnil(L);
-        else lua_pushnumber(L, static_cast<double>(*word));
-        return 1;
-    }
     // ---- skater.control ------------------------------------------------------------------------
-    static std::uint32_t surface_word(lua_State* L, int index) {
-        const double value = luaL_checknumber(L, index);
-        if (!(value >= 1 && value <= 4294967295.0) || value != std::floor(value)) luaL_argerror(L, index, "not a surface from reskate.skater.surface");
-        return static_cast<std::uint32_t>(value);
-    }
-    // surfaces(): each of the local skater's sound material fields (18) as the game gives them now, a
-    // list of material words (0 for a field with none); nil when the local skater's sound is unknown.
-    static int surfaces(lua_State* L) {
-        auto& plugin = plugin_of(L);
-        need(L, plugin, "skater.read", "reskate.skater.surfaces");
-        const auto words = game_of(plugin).skater_surfaces();
-        if (words.empty()) {
-            lua_pushnil(L);
-            return 1;
-        }
-        lua_createtable(L, static_cast<int>(words.size()), 0);
-        for (std::size_t i = 0; i < words.size(); ++i) {
-            lua_pushnumber(L, static_cast<double>(words[i]));
-            lua_rawseti(L, -2, static_cast<int>(i + 1));
-        }
-        return 1;
-    }
-    // surface_sound(word or nil[, from[, fields]]): the local skater's sounds (rolling, landing,
-    // grinding) as on the surface that word names (from surface()), wherever the skater is, or only on
-    // the surfaces listed in from (up to 32; nil or omitted: every surface), and only in the sound's
-    // material fields listed in fields (1 to 18, as surfaces() numbers them; omitted: every one); nil
-    // gives each surface its own.
+    // surface_sound(word or nil[, fields]): the local skater's sounds as on the surface that physics
+    // material word names, wherever the skater is, in the sound's material fields listed in fields
+    // (1 to 18; omitted: every one); nil gives each surface its own.
     static int surface_sound(lua_State* L) {
         auto& plugin = plugin_of(L);
         need(L, plugin, "skater.control", "reskate.skater.surface_sound");
         std::optional<std::uint32_t> word;
-        if (!lua_isnoneornil(L, 1)) word = surface_word(L, 1);
+        if (!lua_isnoneornil(L, 1)) {
+            const double value = luaL_checknumber(L, 1);
+            if (!(value >= 1 && value <= 4294967295.0) || value != std::floor(value)) luaL_argerror(L, 1, "not a physics material word");
+            word = static_cast<std::uint32_t>(value);
+        }
         std::uint32_t fields = ~0U;
-        if (!lua_isnoneornil(L, 3)) {
-            luaL_checktype(L, 3, LUA_TTABLE);
-            const int count = lua_objlen(L, 3);
-            if (count < 1 || count > 18) luaL_argerror(L, 3, "1 to 18 fields");
+        if (!lua_isnoneornil(L, 2)) {
+            luaL_checktype(L, 2, LUA_TTABLE);
+            const int count = lua_objlen(L, 2);
+            if (count < 1 || count > 18) luaL_argerror(L, 2, "1 to 18 fields");
             fields = 0;
             for (int i = 1; i <= count; ++i) {
-                lua_rawgeti(L, 3, i);
+                lua_rawgeti(L, 2, i);
                 const double field = luaL_checknumber(L, -1);
-                if (!(field >= 1 && field <= 18) || field != std::floor(field)) luaL_argerror(L, 3, "fields are 1 to 18");
+                if (!(field >= 1 && field <= 18) || field != std::floor(field)) luaL_argerror(L, 2, "fields are 1 to 18");
                 fields |= 1U << (static_cast<int>(field) - 1);
                 lua_pop(L, 1);
             }
         }
-        std::vector<std::uint32_t> from;
-        if (!lua_isnoneornil(L, 2)) {
-            luaL_checktype(L, 2, LUA_TTABLE);
-            const int count = lua_objlen(L, 2);
-            if (count < 1 || count > 32) luaL_argerror(L, 2, "1 to 32 surfaces");
-            for (int i = 1; i <= count; ++i) {
-                lua_rawgeti(L, 2, i);
-                from.push_back(surface_word(L, lua_gettop(L)));
-                lua_pop(L, 1);
-            }
-        }
-        return result(L, game_of(plugin).skater_surface_sound(plugin.id(), word, std::move(from), fields));
+        return result(L, game_of(plugin).skater_surface_sound(plugin.id(), word, fields));
     }
     static int control(lua_State* L, const char* action) {
         auto& plugin = plugin_of(L);
@@ -3531,7 +3490,7 @@ void WorldApi::install(Plugin& plugin, lua_State* L) {
     lua_pushstring(L, "locked");
     lua_setfield(L, -2, "__metatable");
     lua_setfield(L, LUA_REGISTRYINDEX, "reskate.permissions");
-    add_functions(L, "skater", {{"state", state}, {"surface", surface}, {"surfaces", surfaces}, {"surface_sound", surface_sound}, {"noclip", noclip}, {"boost", boost}, {"freeze", freeze}, {"wipeout", wipeout}, {"xray", xray},
+    add_functions(L, "skater", {{"state", state}, {"surface_sound", surface_sound}, {"noclip", noclip}, {"boost", boost}, {"freeze", freeze}, {"wipeout", wipeout}, {"xray", xray},
                                 {"shape_launch", shape_launch}, {"hide", hide_skater}, {"reach", reach}, {"carry", carry}, {"hand", hand}, {"joint", skater_joint}, {"pose", skater_pose}});
     add_functions(L, "board", {{"motion", board_motion}, {"bones", board_bones}, {"set", board_set}, {"hide", board_hide}, {"clear", board_clear}, {"scale", board_scale},
                                {"park", board_park}, {"fit", board_fit}, {"toss", board_toss}, {"parameters", board_parameters},

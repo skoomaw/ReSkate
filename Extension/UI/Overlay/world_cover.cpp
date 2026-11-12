@@ -3,7 +3,6 @@
 #include "Engine/Core/Hooks/hooks.h"
 #include "Engine/Core/Log/logging.h"
 #include "Extension/Plugins/plugin_camera.h"
-#include "Extension/Skater/board_pose.h"
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -46,17 +45,14 @@ constexpr DXGI_FORMAT depth_copy_format = DXGI_FORMAT_R32_FLOAT;
 // Each command allocator's own shader views in our heap (a list in flight reads its own): the
 // picture's copy, our depth copy, last frame's cover.
 constexpr UINT views_each = 3;
-// Trails (add_trail): points kept, and the buffer each frame's are written to (world_cover.hlsl's t3:
-// two float4s of header, then two a point), one part of the upload buffer per command allocator.
-constexpr std::size_t most_trail = 256; // world_cover.hlsl's MOST_TRAIL
 // The cameras the measurement tries (world_cover.hlsl's ps_measure): only the one read now. Trying the
 // two before as well and drawing with whichever agreed best chose a different one every few seconds
 // (their agreement differed by noise), and every change moved the whole cover by a frame (2026-11-11).
 constexpr std::size_t camera_candidates = 1;
 constexpr std::size_t camera_floats = 12; // right, up, back, eye
-// Then the deck's tread (set_tread): seven float4s (world_cover.hlsl's tread_over).
-constexpr std::size_t tread_floats4 = 7;
-constexpr UINT64 trail_slice = ((most_trail * 2 + 2 + camera_candidates * 4 + tread_floats4) * 16 + 255) / 256 * 256;
+// The cameras go to the shaders in a buffer (world_cover.hlsl's t3: four float4s a camera), one part
+// of the upload buffer per command allocator.
+constexpr UINT64 camera_slice = (camera_candidates * 4 * 16 + 255) / 256 * 256;
 // The measurements: one row a candidate camera, a column a point (ps_measure), read back by the CPU.
 constexpr UINT measure_columns = 32;
 constexpr UINT measure_pitch = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
@@ -87,13 +83,6 @@ struct Asked {
     Settings settings;
     std::vector<Clear> clear;
     std::uint64_t clear_until{}; // keep_clear holds for 300 ms
-    struct TrailPoint {
-        std::array<float, 3> at{};
-        float width{}, fade{};
-        std::uint64_t when{};
-    };
-    std::deque<TrailPoint> trail;
-    std::optional<Tread> tread;
 };
 Asked& asked() { static auto* value = new Asked; return *value; }
 std::atomic<bool> wanted{};
@@ -120,7 +109,6 @@ struct Notes {
     D3D12_RESOURCE_STATES depth_state{}; // the main depth's state when the list ends
     bool unsafe{};         // a split or aliasing barrier on the colour or depth: no cover this frame
     std::uint64_t last_written{}; // the kind (format, flags, compute or drawn) of the last full-size float picture written on it
-    std::vector<std::string> events; // while tracing: what happened on it to the depth and the big float pictures
     // The frame's last list: the screen goes from PRESENT to a render target on it, and the float
     // picture of the finished scene it puts there (with the UI, from a layer of its own) is moved from
     // being written to being read: that picture, its format, and its state before this list.
@@ -197,12 +185,11 @@ struct Shared {
     std::deque<float> nears;
     float held_near{};
     unsigned near_disagreed{}; // frames in a row far from held_near
-    bool tread_said{};         // the deck's place said once since a tread was asked for
     std::uint64_t measured_frames{};
     std::size_t next_allocator{};
     ComPtr<ID3D12GraphicsCommandList> list;
-    ComPtr<ID3D12Resource> trail_upload; // a slice a command allocator (trail_slice bytes each)
-    std::uint8_t* trail_cpu{};
+    ComPtr<ID3D12Resource> camera_upload; // a slice a command allocator (camera_slice bytes each)
+    std::uint8_t* camera_cpu{};
     ComPtr<ID3D12Fence> fence;
     UINT64 fence_value{};
     bool failed{}, said_drawn{}, said_late{}, said_depth{}, said_colour{}, said_waiting{}, said_target{};
@@ -229,14 +216,6 @@ struct Shared {
     bool tried{};               // the cover's moment came this frame
     std::map<std::string, unsigned> outcomes;
     unsigned outcome_frames{}, outcome_reports{};
-    // A trace of six frames, once, about two seconds after the picture is chosen: every batch the game
-    // submits, in order, with what happened in it to the depth and to every big float picture, and
-    // where the cover went in. Said in the log, to see why the cover shows on some frames only.
-    unsigned frames_since_lock{}, trace_frames_left{}, quiet_batches{};
-    bool traced{};
-    std::vector<std::string> trace_lines;
-    std::map<ID3D12Resource*, int> trace_ids;
-    std::vector<std::string> trace_names; // each traced picture as first seen, by id
 };
 Shared& shared() { static auto* value = new Shared; return *value; }
 
@@ -247,7 +226,6 @@ std::atomic<std::size_t> next_depth_handle{};
 std::atomic<ID3D12Resource*> main_depth_now{};
 std::atomic<ID3D12Resource*> colour_now{};
 std::atomic<bool> active{}; // wanted, and installed
-std::atomic<bool> tracing{}; // the six traced frames are being recorded
 // Our own command list: its barriers go through the same hook as the game's and are not the game's.
 std::atomic<ID3D12GraphicsCommandList*> our_list{};
 
@@ -400,38 +378,6 @@ bool record_cover(Shared& s);
 bool snapshot_depth(Shared& s, ID3D12CommandQueue* queue, ExecuteFn original);
 bool depth_shaped(const D3D12_RESOURCE_DESC& d, std::uint32_t width, std::uint32_t height);
 
-// Under the lock. A short name for a picture in the trace: #1, #2, ...
-// `d`, when given, describes it the first time (the picture may be gone when the trace ends).
-int trace_id(Shared& s, ID3D12Resource* r, const D3D12_RESOURCE_DESC* d = nullptr) {
-    const auto at = s.trace_ids.find(r);
-    if (at != s.trace_ids.end()) return at->second;
-    const int id = static_cast<int>(s.trace_ids.size()) + 1;
-    s.trace_ids.emplace(r, id);
-    s.trace_names.push_back(d ? std::format("#{} {}x{} format {} flags 0x{:x}{}", id, d->Width, d->Height, static_cast<unsigned>(d->Format),
-                                            static_cast<unsigned>(d->Flags), r == main_depth_now.load() ? " (the world's depth)" : "")
-                              : std::format("#{}", id));
-    return id;
-}
-// Under the lock: a batch's events as one trace line (or counted as quiet).
-void trace_batch(Shared& s, bool ours_queue, UINT count, ID3D12CommandList* const* lists) {
-    std::string line;
-    for (UINT i = 0; i < count; ++i) {
-        const auto found = s.notes.find(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
-        if (found == s.notes.end() || found->second.events.empty()) continue;
-        line += std::format(" [list {}:", i);
-        for (const auto& e : found->second.events) line += " " + e + ";";
-        line += "]";
-        found->second.events.clear();
-    }
-    if (line.empty()) {
-        ++s.quiet_batches;
-        return;
-    }
-    if (s.quiet_batches) s.trace_lines.push_back(std::format("  ({} batch(es) with nothing traced)", s.quiet_batches));
-    s.quiet_batches = 0;
-    s.trace_lines.push_back(std::format("  batch of {} on {}:{}", count, ours_queue ? "the direct queue" : "ANOTHER queue", line));
-}
-
 void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
     const auto original = original_execute.load();
     if (!active.load(std::memory_order_relaxed) || !lists || !count) return original(queue, count, lists);
@@ -439,10 +385,6 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
         auto& s = shared();
         std::unique_lock lock(s.mutex);
         if (queue != s.queue) {
-            if (tracing.load()) {
-                trace_batch(s, false, count, lists);
-                for (UINT i = 0; i < count; ++i) s.notes.erase(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
-            }
             lock.unlock();
             return original(queue, count, lists);
         }
@@ -472,12 +414,6 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
             s.why = s.unsafe ? "a split or aliasing barrier, or another queue" : s.depth_elsewhere ? "the depth moved on another queue"
                   : composite->final_format != s.chosen_format ? "the final picture in another format" : nullptr;
             const bool drew = !s.why && record_cover(s);
-            if (tracing.load()) {
-                if (s.quiet_batches) s.trace_lines.push_back(std::format("  ({} batch(es) with nothing traced)", s.quiet_batches));
-                s.quiet_batches = 0;
-                s.trace_lines.push_back(drew ? std::format("  >> COVER drawn into #{} (it was in state 0x{:x})", trace_id(s, s.colour), static_cast<unsigned>(s.colour_state))
-                                             : std::format("  >> cover not drawn: {}", s.why ? s.why : "?"));
-            }
             if (drew) {
                 s.drawn = true;
                 ID3D12CommandList* ours[] = {s.list.Get()};
@@ -492,7 +428,6 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
                 }
             }
         }
-        if (tracing.load()) trace_batch(s, true, count, lists);
         bool depth_finished = false;
         for (UINT i = 0; i < count; ++i) {
             const auto found = s.notes.find(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
@@ -558,7 +493,7 @@ bool build_root(Shared& s) {
         parameters[1].DescriptorTable.NumDescriptorRanges = 1;
         parameters[1].DescriptorTable.pDescriptorRanges = &range;
         parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-        parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; // t3: the trails
+        parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; // t3: the cameras
         parameters[2].Descriptor.ShaderRegister = 3;
         parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         D3D12_STATIC_SAMPLER_DESC sampler{};
@@ -653,7 +588,7 @@ bool build_pipeline(Shared& s, DXGI_FORMAT format) {
     return true;
 }
 
-// Our own command list, its allocators, fence, heaps and the trails' upload buffer: made once.
+// Our own command list, its allocators, fence, heaps and the cameras' upload buffer: made once.
 bool build_list(Shared& s) {
     if (!s.list) {
         for (auto& allocator : s.allocators)
@@ -672,7 +607,7 @@ bool build_list(Shared& s) {
         upload.Type = D3D12_HEAP_TYPE_UPLOAD;
         D3D12_RESOURCE_DESC bytes{};
         bytes.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        bytes.Width = trail_slice * s.allocators.size();
+        bytes.Width = camera_slice * s.allocators.size();
         bytes.Height = 1;
         bytes.DepthOrArraySize = 1;
         bytes.MipLevels = 1;
@@ -680,12 +615,12 @@ bool build_list(Shared& s) {
         bytes.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         void* cpu{};
         if (FAILED(s.device->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &bytes, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                                     IID_PPV_ARGS(&s.trail_upload))) ||
-            FAILED(s.trail_upload->Map(0, nullptr, &cpu)) || !cpu) {
-            say_failed("no buffer for the trails.");
+                                                     IID_PPV_ARGS(&s.camera_upload))) ||
+            FAILED(s.camera_upload->Map(0, nullptr, &cpu)) || !cpu) {
+            say_failed("no buffer for the cameras.");
             return false;
         }
-        s.trail_cpu = static_cast<std::uint8_t*>(cpu);
+        s.camera_cpu = static_cast<std::uint8_t*>(cpu);
         D3D12_DESCRIPTOR_HEAP_DESC views{};
         views.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         views.NumDescriptors = views_each * static_cast<UINT>(s.allocators.size());
@@ -985,76 +920,19 @@ bool record_cover(Shared& s) {
 
     Settings settings;
     std::vector<Clear> clear;
-    std::optional<Tread> tread;
     const std::uint64_t now = GetTickCount64();
-    // This frame's trails, into this command allocator's part of the upload buffer.
     {
-        auto* const out = reinterpret_cast<float*>(s.trail_cpu + at * trail_slice);
-        std::size_t count = 0;
-        std::array<float, 6> box{1e30f, 1e30f, -1e30f, -1e30f, 1e30f, -1e30f}; // min x, min z, max x, max z, min y, max y
         auto& a = asked();
         std::lock_guard lock(a.mutex);
         settings = a.settings;
         if (now < a.clear_until) clear = a.clear;
-        std::erase_if(a.trail, [&](const auto& t) { return now - t.when > static_cast<std::uint64_t>(t.fade * 1000); });
-        tread = a.tread;
-        for (const auto& t : a.trail) {
-            const float strength = 1.0f - static_cast<float>(now - t.when) / (t.fade * 1000.0f);
-            float* const point = out + 8 + count * 8;
-            point[0] = t.at[0], point[1] = t.at[1], point[2] = t.at[2], point[3] = t.width;
-            point[4] = std::clamp(strength, 0.0f, 1.0f), point[5] = point[6] = point[7] = 0;
-            box = {std::min(box[0], t.at[0]), std::min(box[1], t.at[2]), std::max(box[2], t.at[0]), std::max(box[3], t.at[2]),
-                   std::min(box[4], t.at[1]), std::max(box[5], t.at[1])};
-            ++count;
-        }
-        out[0] = static_cast<float>(count), out[1] = box[0], out[2] = box[1], out[3] = box[2];
-        out[4] = box[3], out[5] = box[4], out[6] = box[5], out[7] = 0;
-        // The deck's tread, after the cameras: off unless asked for and the deck was drawn just now.
-        {
-            float* const to = out + (most_trail * 2 + 2 + camera_candidates * 4) * 4;
-            std::fill(to, to + tread_floats4 * 4, 0.0f);
-            const auto deck = tread ? board_pose::deck_in_world() : std::nullopt;
-            if (!tread) s.tread_said = false;
-            // Now and then, where the deck is against the skater: a tread far from them is drawn nowhere.
-            if (tread && (!s.tread_said || s.frame % 3600 == 300)) {
-                s.tread_said = true;
-                if (!deck) logging::write(logging::Level::info, logging::Channel::graphics, "World cover: a tread is asked for, and no deck has been drawn.");
-                else {
-                    float apart = -1;
-                    if (!clear.empty()) {
-                        const float dx = deck->position[0] - clear[0].foot[0], dy = deck->position[1] - clear[0].foot[1], dz = deck->position[2] - clear[0].foot[2];
-                        apart = std::sqrt(dx * dx + dy * dy + dz * dz);
-                    }
-                    const auto& q = deck->rotation;
-                    const float up_y = 1 - 2 * (q[0] * q[0] + q[2] * q[2]); // the deck's up, how upright
-                    logging::printf(logging::Level::info, logging::Channel::graphics,
-                                    "World cover: the tread's deck is at (%.2f, %.2f, %.2f), %.2f m from the skater's place, its up %.2f of upright, drawn %llu ms ago.",
-                                    deck->position[0], deck->position[1], deck->position[2], apart, up_y,
-                                    static_cast<unsigned long long>(now - deck->at_ms));
-                }
-            }
-            if (tread && deck && now - deck->at_ms < 250) {
-                // The deck's axes in the world: across (x), up (y) and along it (z), as its rig has them.
-                const auto axis = [&](float x, float y, float z) {
-                    const auto& q = deck->rotation;
-                    const float tx = 2 * (q[1] * z - q[2] * y), ty = 2 * (q[2] * x - q[0] * z), tz = 2 * (q[0] * y - q[1] * x);
-                    return std::array<float, 3>{x + q[3] * tx + (q[1] * tz - q[2] * ty), y + q[3] * ty + (q[2] * tx - q[0] * tz),
-                                                z + q[3] * tz + (q[0] * ty - q[1] * tx)};
-                };
-                const auto across = axis(1, 0, 0), up = axis(0, 1, 0), along = axis(0, 0, 1);
-                to[0] = across[0], to[1] = across[1], to[2] = across[2], to[3] = 0;
-                to[20] = up[0], to[21] = up[1], to[22] = up[2], to[23] = 0;
-                to[24] = along[0], to[25] = along[1], to[26] = along[2], to[27] = 0;
-                to[4] = deck->position[0], to[5] = deck->position[1], to[6] = deck->position[2], to[7] = 1;
-                to[8] = tread->colour[0], to[9] = tread->colour[1], to[10] = tread->colour[2], to[11] = tread->opacity;
-                to[12] = tread->width * 0.5f, to[13] = tread->length * 0.5f, to[14] = tread->height, to[15] = 0.08f; // how far the scene may be from the underside and still be it (the depth's scale is a few per cent off)
-                to[16] = tread->spacing, to[17] = tread->ridge;
-            }
-        }
-        // The candidate cameras for ps_measure, after the most points there can be.
+    }
+    // The candidate cameras for ps_measure, into this command allocator's part of the upload buffer.
+    {
+        auto* const out = reinterpret_cast<float*>(s.camera_cpu + at * camera_slice);
         for (std::size_t c = 0; c < camera_candidates; ++c) {
             const auto& from = s.cameras[std::min(c, s.cameras_known - 1)];
-            float* const to = out + (most_trail * 2 + 2 + c * 4) * 4;
+            float* const to = out + c * 4 * 4;
             for (std::size_t v = 0; v < 4; ++v) {
                 to[v * 4] = from[v * 3], to[v * 4 + 1] = from[v * 3 + 1], to[v * 4 + 2] = from[v * 3 + 2], to[v * 4 + 3] = 0;
             }
@@ -1140,7 +1018,7 @@ bool record_cover(Shared& s) {
     auto table = s.views->GetGPUDescriptorHandleForHeapStart();
     table.ptr += UINT64{view_step} * views_each * at;
     list->SetGraphicsRootDescriptorTable(1, table);
-    list->SetGraphicsRootShaderResourceView(2, s.trail_upload->GetGPUVirtualAddress() + at * trail_slice);
+    list->SetGraphicsRootShaderResourceView(2, s.camera_upload->GetGPUVirtualAddress() + at * camera_slice);
     const D3D12_VIEWPORT viewport{0, 0, width, height, 0, 1};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(colour_desc.Width), static_cast<LONG>(colour_desc.Height)};
     list->RSSetViewports(1, &viewport);
@@ -1213,26 +1091,6 @@ void set(const Settings& settings) noexcept {
     wanted.store(true);
 }
 void clear() noexcept { wanted.store(false); }
-void add_trail(const std::array<float, 3>& at, float width, float fade) noexcept {
-    try {
-        auto& a = asked();
-        std::lock_guard lock(a.mutex);
-        if (!a.trail.empty()) {
-            const auto& last = a.trail.back().at;
-            const float dx = at[0] - last[0], dy = at[1] - last[1], dz = at[2] - last[2];
-            if (dx * dx + dy * dy + dz * dz < 0.05f * 0.05f) return;
-        }
-        a.trail.push_back({at, width, fade, GetTickCount64()});
-        while (a.trail.size() > most_trail) a.trail.pop_front();
-    } catch (...) {}
-}
-void set_tread(std::optional<Tread> tread) noexcept {
-    try {
-        auto& a = asked();
-        std::lock_guard lock(a.mutex);
-        a.tread = tread;
-    } catch (...) {}
-}
 void keep_clear(std::vector<Clear> places) noexcept {
     try {
         if (places.size() > most_clear) places.resize(most_clear);
@@ -1352,33 +1210,6 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
                 s.outcome_frames = 0;
             }
         }
-        // The trace: started 120 frames after the picture is chosen, said frame by frame, six frames.
-        if (s.main_depth && !s.traced && !tracing.load() && ++s.frames_since_lock == 120) {
-            s.trace_frames_left = 6;
-            s.trace_lines.clear();
-            s.trace_ids.clear();
-            s.trace_names.clear();
-            s.quiet_batches = 0;
-            tracing.store(true);
-            logging::write(logging::Level::info, logging::Channel::graphics,
-                           "World cover: trace of 6 frames follows (#n are the big float pictures and the depth, by first sight; states in hex).");
-        } else if (tracing.load()) {
-            if (s.quiet_batches) s.trace_lines.push_back(std::format("  ({} batch(es) with nothing traced)", s.quiet_batches));
-            s.quiet_batches = 0;
-            logging::write(logging::Level::info, logging::Channel::graphics,
-                           std::format("World cover trace, frame {} of 6 ({}), then the present:", 7 - s.trace_frames_left, s.drawn ? "cover drawn" : "cover NOT drawn"));
-            for (const auto& line : s.trace_lines)
-                for (std::size_t at = 0; at < line.size(); at += 700)
-                    logging::write(logging::Level::info, logging::Channel::graphics, (at ? "World cover trace   ..." : "World cover trace") + line.substr(at, 700));
-            s.trace_lines.clear();
-            if (--s.trace_frames_left == 0) {
-                tracing.store(false);
-                s.traced = true;
-                std::string names = "World cover trace: pictures:";
-                for (const auto& name : s.trace_names) names += " " + name + ";";
-                logging::write(logging::Level::info, logging::Channel::graphics, names);
-            }
-        }
         s.tried = false;
         s.why = nullptr;
         // The picture the cover goes into: voted for over 30 frames, then kept while it is still written.
@@ -1437,8 +1268,8 @@ void release() noexcept {
         // The overlay waits for the GPU before it tears down; ours went on the same queue.
         our_list.store(nullptr);
         s.list.Reset();
-        s.trail_upload.Reset();
-        s.trail_cpu = nullptr;
+        s.camera_upload.Reset();
+        s.camera_cpu = nullptr;
         for (auto& allocator : s.allocators) allocator.Reset();
         s.allocator_fence = {};
         s.fence.Reset();
@@ -1483,23 +1314,6 @@ void release() noexcept {
 void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b, BarrierFn /*original*/) noexcept {
     if (!active.load(std::memory_order_relaxed) || list == our_list.load(std::memory_order_relaxed)) return;
     try {
-        // While tracing: every transition of a picture at least half the screen's size, of any format
-        // (the depth, the float pictures, and the tone-mapped and UI pictures after them), on any list.
-        if (tracing.load(std::memory_order_relaxed) && b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION && b.Transition.pResource) {
-            const auto d = b.Transition.pResource->GetDesc();
-            if (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
-                auto& s = shared();
-                std::lock_guard lock(s.mutex);
-                if (d.Width * 2 >= s.width && d.Height * 2 >= s.height) {
-                    auto& n = s.notes[list];
-                    if (n.events.size() < 400)
-                        n.events.push_back(std::format("{}#{} 0x{:x}>0x{:x}{}", list->GetType() == D3D12_COMMAND_LIST_TYPE_DIRECT ? "" : "(compute) ",
-                                                       trace_id(s, b.Transition.pResource, &d), static_cast<unsigned>(b.Transition.StateBefore),
-                                                       static_cast<unsigned>(b.Transition.StateAfter),
-                                                       b.Flags == D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY ? " begin" : b.Flags == D3D12_RESOURCE_BARRIER_FLAG_END_ONLY ? " end" : ""));
-                }
-            }
-        }
         auto* const colour = colour_now.load(std::memory_order_relaxed);
         // Memory aliased onto (or off) the world's colour: it is not ours to touch this frame.
         if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {

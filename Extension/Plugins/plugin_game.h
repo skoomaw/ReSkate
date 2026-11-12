@@ -341,20 +341,6 @@ public:
         float radius{0.6f}, height{2.0f};
     };
     virtual std::string world_cover_clear(std::string_view /*plugin*/, const std::vector<CoverClear>&) { return unavailable; }
-    // A point on a trail through that cover (world_cover::add_trail): pressed away `width` wide, filling
-    // back in over `fade` seconds. Only for the plugin whose cover it is.
-    struct CoverTrail {
-        Vec3 at{};
-        float width{0.25f}, fade{10};
-    };
-    virtual std::string world_cover_trail(std::string_view /*plugin*/, const CoverTrail&) { return unavailable; }
-    // A see-through tread over the underside of the local skater's deck, drawn with that cover
-    // (world_cover::set_tread); empty ends it. Only for the plugin whose cover it is.
-    struct BoardTread {
-        std::array<float, 3> colour{0.08f, 0.08f, 0.09f};
-        float opacity{0.55f}, width{0.19f}, length{0.62f}, height{-0.006f}, spacing{0.016f}, ridge{0.5f};
-    };
-    virtual std::string world_cover_tread(std::string_view /*plugin*/, std::optional<BoardTread>) { return unavailable; }
 
     virtual std::string object_physics(std::string_view, std::uint64_t, const std::optional<ObjectPhysics>&) { return unavailable; }
     virtual std::string object_velocity(std::string_view, std::uint64_t, const Vec3&) { return unavailable; }
@@ -786,18 +772,11 @@ public:
     virtual std::vector<CycleNews> take_camera_cycle() { return {}; }
     // Holds the skater where it is (noclip, with no input), while any plugin asks.
     virtual std::string freeze(std::string_view /*plugin*/, bool) { return unavailable; }
-    // The surface the local skater's sounds are of (a physics material word, as the game gives it),
-    // or nothing when none is known.
-    virtual std::optional<std::uint32_t> skater_surface() { return std::nullopt; }
-    // The local skater's sounds as on that surface, wherever it is (nothing: each surface its own), or
-    // only where it is on one of `from`. One plugin at a time.
-    // `fields`: which of the sound's material fields take it (bit i: field i + 1; all ones: every one).
-    virtual std::string skater_surface_sound(std::string_view /*plugin*/, std::optional<std::uint32_t>, std::vector<std::uint32_t> /*from*/ = {},
-                                             std::uint32_t /*fields*/ = ~0U) {
+    // The local skater's sounds as on the surface a physics material word names, wherever it is, in the
+    // sound's material fields `fields` (bit i: field i + 1); nothing: each surface its own. One plugin at a time.
+    virtual std::string skater_surface_sound(std::string_view /*plugin*/, std::optional<std::uint32_t>, std::uint32_t /*fields*/ = ~0U) {
         return unavailable;
     }
-    // Each of the local skater's sound material fields (18), as the game gives them; empty when unknown.
-    virtual std::vector<std::uint32_t> skater_surfaces() { return {}; }
     // ---- the session's authority (plugins' server copies) --------------------------------------------
     // Drops a player from the session; a chat line to everyone; one to one player (a dedicated
     // server's only: a lobby has no private chat); moves a player's skater (their game does the move).

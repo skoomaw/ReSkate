@@ -1273,7 +1273,6 @@ public:
             if (coverer_ == plugin) {
                 world_cover::clear();
                 world_cover::keep_clear({});
-                world_cover::set_tread(std::nullopt);
                 coverer_.clear();
             }
             return {};
@@ -1285,24 +1284,6 @@ public:
         s.brightness = cover->brightness, s.breakup = cover->breakup, s.sparkle = cover->sparkle, s.snowfall = cover->snowfall;
         s.fall_speed = cover->fall_speed;
         world_cover::set(s);
-        return {};
-    }
-    std::string world_cover_trail(std::string_view plugin, const CoverTrail& point) override {
-        if (coverer_ != plugin) return "this plugin has no cover on the world";
-        world_cover::add_trail(point.at, point.width, point.fade);
-        return {};
-    }
-    std::string world_cover_tread(std::string_view plugin, std::optional<BoardTread> tread) override {
-        if (coverer_ != plugin) return tread ? "this plugin has no cover on the world" : std::string{};
-        if (!tread) {
-            world_cover::set_tread(std::nullopt);
-            return {};
-        }
-        world_cover::Tread t;
-        t.colour = tread->colour;
-        t.opacity = tread->opacity, t.width = tread->width, t.length = tread->length, t.height = tread->height;
-        t.spacing = tread->spacing, t.ridge = tread->ridge;
-        world_cover::set_tread(t);
         return {};
     }
     std::string world_cover_clear(std::string_view plugin, const std::vector<CoverClear>& places) override {
@@ -1978,14 +1959,9 @@ public:
             camera_releasing_ = false;
         }
     }
-    std::optional<std::uint32_t> skater_surface() override {
-        const auto word = multiplayer::local_surface();
-        return word ? std::optional(word) : std::nullopt;
-    }
-    std::vector<std::uint32_t> skater_surfaces() override { return multiplayer::local_surfaces(); }
-    std::string skater_surface_sound(std::string_view plugin, std::optional<std::uint32_t> word, std::vector<std::uint32_t> from, std::uint32_t fields) override {
+    std::string skater_surface_sound(std::string_view plugin, std::optional<std::uint32_t> word, std::uint32_t fields) override {
         if (!surfacer_.empty() && surfacer_ != plugin) return "another plugin sets the skater's surface sound";
-        multiplayer::set_surface_sound(word.value_or(0), from, fields);
+        multiplayer::set_surface_sound(word.value_or(0), fields);
         if (word) surfacer_ = std::string(plugin);
         else surfacer_.clear();
         return {};
@@ -2098,7 +2074,6 @@ public:
         if (coverer_ == plugin) {
             world_cover::clear();
             world_cover::keep_clear({});
-            world_cover::set_tread(std::nullopt);
             coverer_.clear();
         }
         if (viewmodeler_ == plugin) {

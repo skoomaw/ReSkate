@@ -101,7 +101,6 @@ struct Shared {
     std::optional<std::array<Bone, bones>> drawn;
     std::uintptr_t drawn_holder{}; // whose board `drawn` is: a map load or a new board leaves it behind
     std::map<int, std::pair<std::string, Vec3>> sized; // a bone's size, and who holds it
-    std::optional<Placed> deck; // the local deck in the world as last drawn (deck_in_world)
 };
 Shared& shared() {
     static auto* value = new Shared;
@@ -328,13 +327,6 @@ std::optional<std::array<Bone, bones>> read() {
     if (!holder || s.drawn_holder != holder) return std::nullopt;
     return s.drawn;
 }
-std::optional<Placed> deck_in_world() {
-    auto& s = used_by_plugin();
-    std::lock_guard lock(s.mutex);
-    const auto holder = holder_now.load(std::memory_order_acquire);
-    if (!holder || s.drawn_holder != holder) return std::nullopt;
-    return s.deck;
-}
 void tick(std::uintptr_t base, std::uintptr_t component) noexcept {
     std::uintptr_t holder{};
     try {
@@ -478,25 +470,6 @@ void on_render_pose(std::uintptr_t animation_interface) noexcept {
                 const auto [rotation, at] = from_world(world_rotation, world_at);
                 (void)store(bone_at(buffer, b), rotation, at);
             }
-        }
-        // The deck in the world as drawn now, after the writes above: each bone on the one before, from
-        // the reference (0), which is in the world, through the board's place (1) and the mount (2) to
-        // the deck (3). Taking bone 1 for the world left out the reference; adding the board entity's
-        // place as well counted the world twice (the deck was 1244 m from the skater, the skater as far
-        // from the world's middle, 2026-11-11).
-        std::array<Lane, 4> after{};
-        if (peek(buffer, after.data(), sizeof(after))) {
-            Quat rotation{0, 0, 0, 1};
-            Vec3 position{};
-            for (int b = 0; b <= 3; ++b) {
-                position = add(position, rotate(rotation, Vec3{after[b].position[0], after[b].position[1], after[b].position[2]}));
-                rotation = normalised(multiply(rotation, normalised(Quat{after[b].rotation})));
-            }
-            Placed deck;
-            deck.rotation = rotation;
-            deck.position = position;
-            deck.at_ms = GetTickCount64();
-            if (std::all_of(deck.position.begin(), deck.position.end(), [](float v) { return std::isfinite(v) && std::abs(v) < 1e6f; })) s.deck = deck;
         }
     } catch (...) {
     }
