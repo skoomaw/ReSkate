@@ -112,10 +112,13 @@ float3 hash3(float3 p) {
     p += dot(p, p.yxz + 33.33);
     return frac((p.xxy + p.yxx) * p.zyx);
 }
+// A cell's value, its coordinates wrapped every 289 cells first: world coordinates times the noise's
+// scale reach the millions, where hash() has no fraction left and gave flat blocks with straight edges.
+float cell_hash(float2 c) { return hash(c - 289.0 * floor(c / 289.0)); }
 float noise(float2 p) {
     const float2 i = floor(p), f = frac(p);
     const float2 u = f * f * (3 - 2 * f);
-    return lerp(lerp(hash(i), hash(i + float2(1, 0)), u.x), lerp(hash(i + float2(0, 1)), hash(i + float2(1, 1)), u.x), u.y);
+    return lerp(lerp(cell_hash(i), cell_hash(i + float2(1, 0)), u.x), lerp(cell_hash(i + float2(0, 1)), cell_hash(i + float2(1, 1)), u.x), u.y);
 }
 
 float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
@@ -375,8 +378,9 @@ Output ps_main(Vertex input) {
     // change of weather broke it (2026-11-12).
     const float left = last_back.w;
     if (left < 0.999) {
+        // None at all once it has all melted (left 0), all of it while none has (left 1).
         const float thin = noise(steady.xz * 0.9) * 0.6 + noise(steady.xz * 2.1) * 0.2;
-        cover *= smoothstep(thin - 0.2, thin + 0.4, left * 1.3);
+        cover *= smoothstep(thin, thin + 0.35, left * 1.15);
         if (cover <= 0.002) {
             out_.colour.rgb = snowfall(shown, p, scene_distance, exposure);
             return out_;
@@ -384,7 +388,7 @@ Output ps_main(Vertex input) {
     }
     float3 lit = colour_amount.rgb * light * shape.z;
     if (extra.x > 0) {
-        const float glint = hash(floor(steady.xz * 38.0) + floor(steady.y * 38.0));
+        const float glint = cell_hash(floor(steady.xz * 38.0) + floor(steady.y * 38.0));
         lit += light * extra.x * 6.0 * step(0.996, glint);
     }
     out_.colour = float4(snowfall(lerp(shown, lit, cover), p, scene_distance, exposure), under.a);

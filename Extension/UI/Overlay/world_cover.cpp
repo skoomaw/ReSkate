@@ -846,8 +846,10 @@ void take_measurements(Shared& s, const std::uint8_t* rows) {
     std::vector<float> sorted(s.nears.begin(), s.nears.end());
     const auto half = sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2);
     std::nth_element(sorted.begin(), half, sorted.end());
-    // Only once a few frames agree on it.
-    s.held_near = sorted.size() >= 5 ? *half : s.held_near;
+    // Only once a few frames agree on it, and then changed only when the middle of them is more than 2%
+    // off: the world is rebuilt from it, and a middle that moved a little each frame jigged the snow's
+    // pattern up and down (2026-11-12).
+    if (sorted.size() >= 5 && (s.held_near <= 0 || std::abs(*half - s.held_near) > s.held_near * 0.02f)) s.held_near = *half;
     if (++s.measured_frames % 1800 == 300)
         logging::printf(logging::Level::info, logging::Channel::graphics, "World cover: near distance %.5f (%zu of %u points agree).", s.held_near,
                         best_count, measure_columns);
