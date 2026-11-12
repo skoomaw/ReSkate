@@ -772,7 +772,19 @@ bool stencil_request(Shared& s, ID3D12GraphicsCommandList* list, const D3D12_RES
     UINT64 total{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
     s.device->GetCopyableFootprints(&plane, 1, 1, 0, &layout, nullptr, nullptr, &total);
-    if (!total) return false;
+    const UINT64 asked_total = total;
+    // Not a size a buffer can be (the device would not say, 2026-11-12): one byte a pixel, each row
+    // padded to 256 bytes, as a stencil plane is copied.
+    if (!total || total == ~UINT64{0} || total > (UINT64{1} << 28) || layout.Footprint.Width != d.Width) {
+        layout = {};
+        layout.Footprint.Format = DXGI_FORMAT_R8_TYPELESS;
+        layout.Footprint.Width = static_cast<UINT>(d.Width);
+        layout.Footprint.Height = d.Height;
+        layout.Footprint.Depth = 1;
+        layout.Footprint.RowPitch = (static_cast<UINT>(d.Width) + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) / D3D12_TEXTURE_DATA_PITCH_ALIGNMENT *
+                                    D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+        total = UINT64{layout.Footprint.RowPitch} * d.Height;
+    }
     if (!s.stencil_readback || s.stencil_readback->GetDesc().Width < total) {
         if (s.stencil_readback) s.retiring.push_back({s.fence_value, s.stencil_readback});
         s.stencil_readback.Reset();
@@ -786,10 +798,14 @@ bool stencil_request(Shared& s, ID3D12GraphicsCommandList* list, const D3D12_RES
         bytes.MipLevels = 1;
         bytes.SampleDesc.Count = 1;
         bytes.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        if (FAILED(s.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bytes, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                     IID_PPV_ARGS(&s.stencil_readback)))) {
+        const HRESULT made = s.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bytes, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                               IID_PPV_ARGS(&s.stencil_readback));
+        if (FAILED(made)) {
             s.stencil_reports = 20;
-            logging::write(logging::Level::info, logging::Channel::graphics, "World cover stencil test: no readback buffer could be made.");
+            logging::printf(logging::Level::info, logging::Channel::graphics,
+                            "World cover stencil test: no readback buffer could be made (0x%08x; %llu bytes, the device said %llu, format %u, plane %ux%u pitch %u).",
+                            static_cast<unsigned>(made), static_cast<unsigned long long>(total), static_cast<unsigned long long>(asked_total),
+                            static_cast<unsigned>(layout.Footprint.Format), layout.Footprint.Width, layout.Footprint.Height, layout.Footprint.RowPitch);
             return false;
         }
     }
