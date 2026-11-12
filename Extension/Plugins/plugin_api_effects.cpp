@@ -91,7 +91,8 @@ struct EffectsApi {
         const auto [ready, epoch] = p.services_.game().effects_state();
         lua_pushboolean(L, ready); lua_pushnumber(L, static_cast<double>(epoch)); return 2;
     }
-    // cover({colour = {r, g, b}, amount, facing, softness, brightness, breakup, sparkle, snowfall, fall_speed}): a cover over
+    // cover({colour = {r, g, b}, amount, facing, softness, brightness, breakup, sparkle, snowfall, fall_speed,
+    // left_sun, left_shade}): a cover over
     // every upward-facing surface of the world (snow, sand, dust), drawn into the world's picture before
     // the game's post-processing and its UI, so menus and the HUD are never under it. On this screen,
     // until cover(nil); one plugin at a time. Not a per-tick call, and no effect handle.
@@ -122,6 +123,8 @@ struct EffectsApi {
         number("sparkle", c.sparkle, 0, 1, "a cover's sparkle is 0 to 1");
         number("snowfall", c.snowfall, 0, 1, "a cover's snowfall is 0 to 1");
         number("fall_speed", c.fall_speed, 0.1, 4, "a cover's fall_speed is 0.1 to 4");
+        number("left_sun", c.left_sun, 0, 1, "a cover's left_sun is 0 to 1");
+        number("left_shade", c.left_shade, 0, 1, "a cover's left_shade is 0 to 1");
         lua_getfield(L, 1, "colour");
         if (!lua_isnil(L, -1)) {
             luaL_checktype(L, -1, LUA_TTABLE);

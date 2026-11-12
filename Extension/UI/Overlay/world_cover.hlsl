@@ -16,8 +16,8 @@ cbuffer constants : register(b0) {
     float4 clears[3];     // each: its foot in the world, and its radius
     float4 last_right;    // last frame's camera (as this frame's above), and whether last frame's cover is there
     float4 last_up;       // ..., and how much of this frame's cover goes into what is shown (the rest is last frame's)
-    float4 last_back;
-    float4 last_eye;
+    float4 last_back;     // ..., and how much of the cover is left in the light (melting: 1 all of it)
+    float4 last_eye;      // ..., and how much is left in the shade
 };
 Texture2D<float4> scene : register(t0);
 Texture2D<float> depth : register(t1);
@@ -363,6 +363,18 @@ Output ps_main(Vertex input) {
     // and smear in it, faint dark copies of moving things (and the skater's soft contact shadow) that
     // showed on the snow as ghost outlines and a dark disc. Snow scatters light: its shadows are pale.
     const float light = max(lerp(close, own, 0.1), wide * 0.6);
+    // Melting: in the light it goes first, in the shade (darker than the scene round about: a building's
+    // shadow) later; in patches, the thin places first, so it does not just fade out evenly.
+    const float shade = 1 - smoothstep(0.35, 0.75, light / max(exposure, 1e-4));
+    const float left = lerp(last_back.w, last_eye.w, shade);
+    if (left < 0.999) {
+        const float thin = noise(steady.xz * 0.9) * 0.55 + noise(steady.xz * 3.7) * 0.25;
+        cover *= smoothstep(thin, thin + 0.3, left * 1.2);
+        if (cover <= 0.002) {
+            out_.colour.rgb = snowfall(shown, p, scene_distance, exposure);
+            return out_;
+        }
+    }
     float3 lit = colour_amount.rgb * light * shape.z;
     if (extra.x > 0) {
         const float glint = hash(floor(steady.xz * 38.0) + floor(steady.y * 38.0));

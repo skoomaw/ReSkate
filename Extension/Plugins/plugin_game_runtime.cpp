@@ -1283,6 +1283,7 @@ public:
         s.amount = cover->amount, s.facing = cover->facing, s.softness = cover->softness;
         s.brightness = cover->brightness, s.breakup = cover->breakup, s.sparkle = cover->sparkle, s.snowfall = cover->snowfall;
         s.fall_speed = cover->fall_speed;
+        s.left_sun = cover->left_sun, s.left_shade = cover->left_shade;
         world_cover::set(s);
         return {};
     }
@@ -2239,6 +2240,27 @@ private:
     }
     static std::string reply(const std::string& answer) {
         return answer.starts_with("error") || answer.find("not") != std::string::npos ? answer : std::string{};
+    }
+    std::string time_of_day_now() override {
+        static constexpr std::array<std::string_view, 8> times{"default", "morning", "noon", "afternoon", "evening", "night",
+                                                               "weatherday", "weathernight"};
+        const auto world = local_profile_world_layers();
+        if (world.map == WorldMap::none) return {};
+        unsigned forced{};
+        for (unsigned n = 1; n < times.size(); ++n) {
+            const auto prefix = std::string(world_map_key(world.map)) + "_tod_" + std::to_string(n) + "_";
+            const auto layer = std::find_if(world_layers().begin(), world_layers().end(),
+                                            [&](const auto& item) { return item.key.starts_with(prefix); });
+            if (layer == world_layers().end()) return "default";
+            const auto& choice = world.choices[static_cast<std::size_t>(layer - world_layers().begin())];
+            if (choice == "on") {
+                if (forced) return "default";
+                forced = n;
+            } else if (choice != "off") {
+                return "default";
+            }
+        }
+        return std::string(times[forced]);
     }
     // As the console's `tod`: each map has seven time layers, "<map>_tod_<n>_<name>"; one is
     // forced on and the rest off, or all seven go back to the level's own choice.

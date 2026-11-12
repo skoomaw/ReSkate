@@ -348,6 +348,7 @@ struct FakeGame final : Game {
             return {};
         }
         coverer = plugin;
+        cover_asked = c;
         calls.push_back(std::format("cover {} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f}", plugin, c->colour[0], c->colour[1],
                                     c->colour[2], c->amount, c->facing, c->softness, c->brightness, c->breakup, c->sparkle, c->snowfall));
         return {};
@@ -395,6 +396,9 @@ struct FakeGame final : Game {
     std::optional<MarkerEvents> marker_events(std::string_view plugin) override {
         return std::exchange(marker_feed[std::string(plugin)], {});
     }
+    std::string tod_now = "afternoon";
+    std::string time_of_day_now() override { return tod_now; }
+    std::optional<WorldCover> cover_asked;
     std::optional<std::uint32_t> surface_set;
     std::uint32_t surface_fields{};
     std::string skater_surface_sound(std::string_view, std::optional<std::uint32_t> word, std::uint32_t fields) override {
@@ -1494,6 +1498,25 @@ Candidate script(const std::string& id, const std::string& main, const std::stri
 }
 
 void running(const Host& host, std::string_view id, const TestEnvironment& environment);
+
+void the_time_of_day_is_read_and_the_cover_melts() {
+    TestEnvironment environment;
+    Host host(environment, Side::client);
+    host.apply({script("melt", R"(
+        assert(reskate.world.time() == "afternoon")
+        assert(reskate.effects.cover({left_sun = 0.25, left_shade = 0.75}))
+        assert(not pcall(reskate.effects.cover, {left_sun = 2}), "left_sun is 0 to 1")
+    )", R"("world.environment", "effects")")});
+    running(host, "melt", environment);
+    check(environment.fake.cover_asked && environment.fake.cover_asked->left_sun == 0.25f && environment.fake.cover_asked->left_shade == 0.75f,
+          "a cover's melt is passed on: how much is left in the light and in the shade");
+    TestEnvironment denied_environment;
+    Host denied(denied_environment, Side::client);
+    denied.apply({script("melt-denied", R"(
+        assert(not pcall(reskate.world.time), "needs world.environment")
+    )")});
+    running(denied, "melt-denied", denied_environment);
+}
 
 void the_skater_surface_sound_is_set_for_some_fields() {
     TestEnvironment environment;
@@ -7219,6 +7242,7 @@ int main() {
         run(a_manifest_says_what_a_plugin_is);
         run(a_variant_can_wait_for_the_next_launch);
         run(the_skater_surface_sound_is_set_for_some_fields);
+        run(the_time_of_day_is_read_and_the_cover_melts);
         run(ui_value_reservations_enforce_limits_and_collisions);
         run(plugins_publish_only_their_own_ui_values);
         run(plugin_approval_follows_the_plugins_own_files);

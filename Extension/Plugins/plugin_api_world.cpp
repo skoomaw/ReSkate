@@ -793,6 +793,16 @@ struct WorldApi {
         return result(L, game_of(plugin).set_environment(kind, key, value));
     }
     static int set_time(lua_State* L) { return environment(L, "tod", checked_text(L, 1, 20, "a time of day"), {}); }
+    // time(): the time of day forced on the map now ("morning" ... "weathernight"), "default" for the
+    // level's own, or nil with no map.
+    static int time_now(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "world.environment", "reskate.world.time");
+        const auto now = game_of(plugin).time_of_day_now();
+        if (now.empty()) lua_pushnil(L);
+        else lua_pushlstring(L, now.data(), now.size());
+        return 1;
+    }
     static int set_control(lua_State* L) {
         const auto key = checked_text(L, 1, 30, "a world control");
         const double value = luaL_checknumber(L, 2);
@@ -3503,7 +3513,7 @@ void WorldApi::install(Plugin& plugin, lua_State* L) {
     add_functions(L, "entities", {{"set", entities_set}, {"remove", entities_remove}, {"clear", entities_clear}, {"status", entities_status},
                                   {"ready", entities_ready}, {"blueprints", entities_blueprints},
                                   {"bounds", entities_bounds}});
-    add_functions(L, "world", {{"set_time", set_time}, {"set_control", set_control}, {"set_park", set_park}, {"controls", controls}, {"pick", world_pick}, {"probe", world_probe}});
+    add_functions(L, "world", {{"set_time", set_time}, {"time", time_now}, {"set_control", set_control}, {"set_park", set_park}, {"controls", controls}, {"pick", world_pick}, {"probe", world_probe}});
     add_functions(L, "travel", {{"locations", locations}, {"levels", levels}, {"go", go}, {"load", load}});
     add_functions(L, "ai", {{"spawn", ai_spawn}, {"clear", ai_clear}, {"count", ai_count}});
     add_functions(L, "session", {{"skaters", skaters}, {"tag", tag}, {"nametags", nametags}, {"joint", session_joint}, {"touch", session_touch},
