@@ -1945,8 +1945,11 @@ public:
         return camera_shown_ ? std::string{} : camera_status_.empty() ? "waiting for the game's camera" : camera_status_;
     }
     void apply_camera(std::uintptr_t base, std::uintptr_t client, bool ready, bool phase) {
-        // A plugin's world cover only over a level in play, with no game menu open (world_cover.h).
-        world_cover::allow(ready && base && !multiplayer::sample_game_ui_state(base).in_menu);
+        // A plugin's world cover only over a level in play, with no game menu open (world_cover.h); and in
+        // the replay editor, whose picture is the world (with its HUD hidden, a clean shot of it), though
+        // the game counts it a menu (2026-11-12).
+        const bool replay = base && multiplayer::replay_editor_open(base);
+        world_cover::allow(base && ((ready && !multiplayer::sample_game_ui_state(base).in_menu) || replay));
         if (multiplayer::party_spectating()) {
             // Spectate has the lease now, and gives the game's camera back itself.
             camera_shown_ = camera_releasing_ = false;
