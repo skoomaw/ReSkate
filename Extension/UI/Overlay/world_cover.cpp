@@ -186,6 +186,8 @@ struct Shared {
     std::deque<float> nears;
     float held_near{};
     float shown_near{}; // what the shader is given: held_near, eased into over half a second
+    double fallen{}; // how far the snow has fallen, in seconds at the usual speed (each moment at its own speed)
+    std::uint64_t fallen_at{};
     std::uint64_t shown_near_at{};
     unsigned near_disagreed{}; // frames in a row far from held_near
     std::uint64_t measured_frames{};
@@ -1010,6 +1012,11 @@ bool record_cover(Shared& s) {
         if (std::abs(s.shown_near - s.held_near) < s.held_near * 1e-4f) s.shown_near = s.held_near;
     }
     s.shown_near_at = now;
+    // The snow's fall, at the speed asked for now: a change of speed carries on from where the flakes are.
+    // Once an hour or so it starts again (as the time it was taken from did), so the GPU's float holds it.
+    if (s.fallen_at && now > s.fallen_at) s.fallen += static_cast<double>(std::min<std::uint64_t>(now - s.fallen_at, 250)) / 1000.0 * settings.fall_speed;
+    s.fallen_at = now;
+    if (s.fallen > 3600.0) s.fallen = 0;
     const auto& m = camera; // right, up, back, eye: three a row
     const float width = static_cast<float>(colour_desc.Width), height = static_cast<float>(colour_desc.Height);
     std::array<float, constant_count> constants{
@@ -1019,7 +1026,7 @@ bool record_cover(Shared& s) {
         m[9], m[10], m[11], s.shown_near, // the near distance measured (0: not yet, the shader measures its own)
         settings.colour[0], settings.colour[1], settings.colour[2], settings.amount,
         settings.facing, settings.softness, settings.brightness, settings.breakup,
-        settings.sparkle, static_cast<float>(now % 3600000) / 1000.0f, settings.snowfall, settings.fall_speed,
+        settings.sparkle, static_cast<float>(s.fallen), settings.snowfall, settings.fall_speed,
         static_cast<float>(std::min(clear.size(), most_clear)), 0, 0, 0, // then each place's height, below
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // the places' feet and radii, below
         s.last_camera[0], s.last_camera[1], s.last_camera[2], have_last ? 1.0f : 0.0f,

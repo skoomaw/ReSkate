@@ -11,7 +11,7 @@ cbuffer constants : register(b0) {
     float4 eye_near;      // where it is, and the near distance the reversed depth is over when not measured
     float4 colour_amount; // the cover's colour, and how much of a covered surface it hides
     float4 shape;         // facing, softness, brightness, breakup
-    float4 extra;         // sparkle, seconds (for the falling snow), how much snow falls (0 to 1), how fast (1 the usual)
+    float4 extra;         // sparkle, how far the snow has fallen (seconds at the usual speed), how much snow falls (0 to 1), how fast (1 the usual)
     float4 clear_info;    // how many places are kept clear (0 to 3), then each one's height above its foot
     float4 clears[3];     // each: its foot in the world, and its radius
     float4 last_right;    // last frame's camera (as this frame's above), and whether last frame's cover is there
@@ -207,12 +207,15 @@ float3 snowfall(float3 colour, int2 p, float scene_distance, float exposure) {
     const float amount = extra.z;
     if (amount <= 0) return colour;
     const float3 dir = normalize(ray_of(p));
-    const float seconds = extra.y;
+    const float seconds = extra.y; // fallen, in seconds at the usual speed; the flakes' sway goes with it
     const float fall = 1.1 * max(extra.w, 0.05);          // metres a second down (about 1.1 at the usual speed)
     const float3 wind = float3(0.35, 0, 0.2) * max(extra.w, 0.3);
     const float3 velocity = float3(wind.x, -fall, wind.z);
     // The grid moves against the flakes: a flake fixed in the grid falls and drifts in the world.
-    const float3 shift = -velocity * seconds;
+    // How far it has fallen, kept by the CPU at the speed of each moment (extra.y): from the time times
+    // this moment's speed, a change of speed moved every flake at once (2026-11-12). The wind goes with
+    // the speed, as it does above (but for its floor at the slowest speeds).
+    const float3 shift = -float3(0.35, -1.1, 0.2) * seconds;
     // Its streak over a frame, against the camera: back where it was, seen from where the camera was.
     float3 moved = -velocity / 60.0;
     if (last_right.w > 0) moved += eye_near.xyz - last_eye.xyz;
