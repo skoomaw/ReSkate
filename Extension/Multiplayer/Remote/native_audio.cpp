@@ -324,7 +324,6 @@ void set_surface_sound(std::uint32_t word, std::uint32_t fields) noexcept {
     s.surface_sound.store(word, std::memory_order_release);
     s.surface_resend.store(true, std::memory_order_release);
 }
-bool surface_wanted() noexcept { return state().surface_sound.load(std::memory_order_relaxed) != 0; }
 std::vector<AudioSample> drain_audio_capture(std::uint64_t now) {
     auto &s = state();
     std::lock_guard lock(s.mutex);

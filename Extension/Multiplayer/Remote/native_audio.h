@@ -16,6 +16,4 @@ std::uint64_t played_audio_frames() noexcept;
 // (0: each surface its own sound). Others in a session hear it too: they hear what the skater's
 // sound updates say.
 void set_surface_sound(std::uint32_t word, std::uint32_t fields = ~0U) noexcept;
-// Whether the local skater's sound updates are wanted outside a session: a surface sound is set.
-bool surface_wanted() noexcept;
 } // namespace dingosdk::multiplayer
