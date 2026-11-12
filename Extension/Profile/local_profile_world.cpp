@@ -112,6 +112,7 @@ bool set_local_world_control(std::string_view key, float value) {
     if (population ? !r.population_active : !r.environment_active) return false;
     try {
         s.store->save_world_controls(c); r.model.choices = c; r.last_update = 0; r.diagnostic_due = GetTickCount64() + 6000;
+        r.fog_report_due = GetTickCount64() + 3000;
         r.model.status = "Saved. Applying world controls.";
         dingosdk::logging::event(dingosdk::logging::Channel::profile, dingosdk::Json{{"event","world_control_saved"},{"key",key},{"value",value}}.dump().c_str());
         return true;

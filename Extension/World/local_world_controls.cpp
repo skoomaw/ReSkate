@@ -42,13 +42,48 @@ float environment_choice(unsigned field, const WorldControls& c, float original,
     }
 }
 
+// The fog test (a test build): each fog component of the map now, in the log, a little after a map
+// loads or a fog control changes (at most 30 times a run): which environment it is in, whether its fog
+// and height fog are on, its distances and override flags, and whether the controls own any of it.
+void report_fog(WorldControlRuntime& r, WorldMap map, VisualEnvironments& environments) {
+    if (!r.fog_report_due || GetTickCount64() < r.fog_report_due || r.fog_reports >= 30) return;
+    r.fog_report_due = 0;
+    ++r.fog_reports;
+    const auto& c = r.model.choices;
+    logging::printf(logging::Level::info, logging::Channel::world,
+                    "Fog test %u: choices fog %d, fog_distance %.2f; components fog %u sky %u wind %u, %zu tracked; %s",
+                    r.fog_reports, c.fog, static_cast<double>(c.fog_distance), r.model.environments[0], r.model.environments[1],
+                    r.model.environments[2], r.nodes.size(), r.model.status.c_str());
+    unsigned said = 0;
+    for (const auto& [_, n] : r.nodes) {
+        if (n.kind != 0 || said >= 16) continue;
+        const auto parent = environments.nodes.find(n.parent);
+        const bool here = parent != environments.nodes.end() && parent->second.map == map;
+        std::uint8_t enable{}, height_enable{};
+        float start{}, end{}, multiplier{}, visibility{}, height_start{}, height_end{};
+        std::uint32_t flags{}, height_flags{};
+        read(n.component + 0x26b, enable); read(n.component + 0x276, height_enable);
+        read(n.component + 0x1bc, start); read(n.component + 0x1d0, end); read(n.component + 0x1f4, multiplier);
+        read(n.component + 0x1d4, visibility); read(n.component + 0x188, height_start); read(n.component + 0x18c, height_end);
+        read(n.component + 0x198, flags); read(n.component + 0x1dc, height_flags);
+        ++said;
+        logging::printf(logging::Level::info, logging::Channel::world,
+                        "Fog test   %s%s: fog %u (start %.1f end %.1f multiplier %.2f), height fog %u (start %.1f end %.1f visibility %.1f), "
+                        "flags 0x%08x 0x%08x, %zu field(s) set by the controls",
+                        parent != environments.nodes.end() ? parent->second.name.c_str() : "(environment not known)", here ? "" : " (another map)",
+                        enable, static_cast<double>(start), static_cast<double>(end), static_cast<double>(multiplier), height_enable,
+                        static_cast<double>(height_start), static_cast<double>(height_end), static_cast<double>(visibility), flags, height_flags,
+                        n.atmosphere.size());
+    }
+}
+
 void update_environment_controls(WorldMap map) {
     auto& r = world_control_runtime(); auto& environments = visual_environments();
     // Parent lifetime lock always precedes the component lock. Factory/destructor
     // hooks never take a profile/model/parent lock, including during native calls.
     std::lock_guard parents(environments.mutex);
     std::lock_guard lock(r.mutex);
-    if (r.map != map) { r.map = map; r.last_update = 0; r.diagnostic_due = GetTickCount64() + 6000; }
+    if (r.map != map) { r.map = map; r.last_update = 0; r.diagnostic_due = GetTickCount64() + 6000; r.fog_report_due = GetTickCount64() + 6000; }
     if (!r.environment_active.load(std::memory_order_acquire)) return;
     const auto now = GetTickCount64();
     if (!r.thread) r.thread = GetCurrentThreadId();
@@ -74,6 +109,7 @@ void update_environment_controls(WorldMap map) {
         if (selected) ++r.model.environments[n.kind];
         ok &= apply_atmosphere_controls(n, selected ? r.model.choices : WorldControls{}, selected);
     }
+    report_fog(r, map, environments);
     r.model.status = !ok ? "Some environment controls could not be applied." :
         map == WorldMap::none ? "Load a level to use world controls." :
         r.model.environments[0] && r.model.environments[1] && r.model.environments[2] ?

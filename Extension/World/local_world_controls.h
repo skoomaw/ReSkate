@@ -56,6 +56,8 @@ struct WorldControlRuntime {
     DWORD thread{};
     std::uint64_t last_update{};
     std::uint64_t diagnostic_due{};
+    std::uint64_t fog_report_due{}; // the fog test: when the fog components are next said in the log
+    unsigned fog_reports{};
     std::map<unsigned, std::map<std::string, std::shared_ptr<std::uintptr_t>, std::less<>>> textures;
 };
 
