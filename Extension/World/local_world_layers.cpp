@@ -303,26 +303,6 @@ void update_world_layers(std::uintptr_t manager, std::uint64_t now) {
             desired[at] = true; explicit_choice[at] = true;
         }
     }
-    // Weather (night) is the night with weather over it: its layer has no sky or lighting of its own,
-    // and it showed the night only while the time before it was left loaded beside it (until
-    // e778606 unloaded the old time first). With it on, the map's Night layer is loaded under it.
-    {
-        const auto row_of = [&](const char* slot_name) {
-            const auto key = std::string(world_map_key(map)) + "_tod_" + slot_name;
-            for (unsigned i = 0; i < world_layers().size(); ++i)
-                if (world_layers()[i].map == map && world_layers()[i].key.starts_with(key)) return i;
-            return static_cast<unsigned>(world_layers().size());
-        };
-        const auto weather_night = row_of("7_"), night = row_of("5_");
-        if (weather_night < world_layers().size() && night < world_layers().size() && desired[world_leaf(weather_night)] == true &&
-            choice_of(weather_night) == "on" && !world_layer_kept_off(world_layers()[night].key)) {
-            for (int at = static_cast<int>(world_leaf(night)); at >= 0; at = world_parent(at)) {
-                desired[at] = true; explicit_choice[at] = true; disabled[at] = false;
-            }
-            const auto night_switch = world_switch(night);
-            desired[night_switch] = true; explicit_choice[night_switch] = true; disabled[night_switch] = false;
-        }
-    }
     // Baselines must be captured before acquiring ownership, especially for
     // autoloaded systems that were already present before the first override.
     for (unsigned slot = 0; slot < targets.size(); ++slot)
