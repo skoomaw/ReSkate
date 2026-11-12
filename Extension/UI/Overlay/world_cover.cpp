@@ -185,6 +185,8 @@ struct Shared {
     // The near distance each recent frame measured, and the steady middle of them (0: none yet).
     std::deque<float> nears;
     float held_near{};
+    float shown_near{}; // what the shader is given: held_near, eased into over half a second
+    std::uint64_t shown_near_at{};
     unsigned near_disagreed{}; // frames in a row far from held_near
     std::uint64_t measured_frames{};
     std::size_t next_allocator{};
@@ -839,6 +841,7 @@ void take_measurements(Shared& s, const std::uint8_t* rows) {
     if (s.held_near > 0 && std::abs(measured - s.held_near) > s.held_near * 0.2f) {
         if (++s.near_disagreed < 20) return;
         s.nears.clear();
+        s.held_near = 0; // a new camera: its own distance, from the start
     }
     s.near_disagreed = 0;
     s.nears.push_back(measured);
@@ -846,10 +849,17 @@ void take_measurements(Shared& s, const std::uint8_t* rows) {
     std::vector<float> sorted(s.nears.begin(), s.nears.end());
     const auto half = sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2);
     std::nth_element(sorted.begin(), half, sorted.end());
-    // Only once a few frames agree on it, and then changed only when the middle of them is more than 2%
-    // off: the world is rebuilt from it, and a middle that moved a little each frame jigged the snow's
-    // pattern up and down (2026-11-12).
-    if (sorted.size() >= 5 && (s.held_near <= 0 || std::abs(*half - s.held_near) > s.held_near * 0.02f)) s.held_near = *half;
+    // Only once a few frames agree on it. A measurement only ever comes out too far, never too near: the
+    // depth is read on the skater's surface, which is a little before the point measured. So the
+    // distance held only goes down, to the lowest middle measured (they were 0.060 to 0.072 m, the
+    // game's own about 0.060), and in time it stops changing. The world is rebuilt from it: one that
+    // went up and down with the measurements made the snow's pattern jump on the ground, plainest
+    // while the snow was half melted (2026-11-12).
+    if (sorted.size() >= 5 && (s.held_near <= 0 || *half < s.held_near * 0.997f)) {
+        if (s.held_near > 0)
+            logging::printf(logging::Level::debug, logging::Channel::graphics, "World cover: near distance %.5f, was %.5f.", *half, s.held_near);
+        s.held_near = *half;
+    }
     if (++s.measured_frames % 1800 == 300)
         logging::printf(logging::Level::info, logging::Channel::graphics, "World cover: near distance %.5f (%zu of %u points agree).", s.held_near,
                         best_count, measure_columns);
@@ -991,13 +1001,22 @@ bool record_cover(Shared& s) {
     transition(list, s.colour, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
     transition(list, write_cover, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
+    // A change of the distance held slides the snow's pattern over half a second instead of jumping it.
+    if (s.held_near <= 0 || s.shown_near <= 0 || now < s.shown_near_at) {
+        s.shown_near = s.held_near;
+    } else {
+        const float step = std::min(static_cast<float>(now - s.shown_near_at) / 150.0f, 1.0f);
+        s.shown_near += (s.held_near - s.shown_near) * step;
+        if (std::abs(s.shown_near - s.held_near) < s.held_near * 1e-4f) s.shown_near = s.held_near;
+    }
+    s.shown_near_at = now;
     const auto& m = camera; // right, up, back, eye: three a row
     const float width = static_cast<float>(colour_desc.Width), height = static_cast<float>(colour_desc.Height);
     std::array<float, constant_count> constants{
         m[0], m[1], m[2], projector->focal,
         m[3], m[4], m[5], width,
         m[6], m[7], m[8], height,
-        m[9], m[10], m[11], s.held_near, // the near distance measured (0: not yet, the shader measures its own)
+        m[9], m[10], m[11], s.shown_near, // the near distance measured (0: not yet, the shader measures its own)
         settings.colour[0], settings.colour[1], settings.colour[2], settings.amount,
         settings.facing, settings.softness, settings.brightness, settings.breakup,
         settings.sparkle, static_cast<float>(now % 3600000) / 1000.0f, settings.snowfall, settings.fall_speed,
@@ -1294,6 +1313,7 @@ void release() noexcept {
         s.cameras_known = 0;
         s.nears.clear();
         s.held_near = 0;
+        s.shown_near = 0;
         s.near_disagreed = 0;
         s.measured_frames = 0;
         s.depth_copied_frame = ~std::uint64_t{0};
