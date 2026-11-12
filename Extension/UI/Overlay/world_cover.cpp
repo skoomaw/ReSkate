@@ -873,7 +873,8 @@ bool record_cover(Shared& s) {
     // Our copy of the game's depth, taken this frame as soon as the game had finished it.
     // Else the last frame's, still there: a frame now and then had none (the depth not readable when
     // its batch went), and the snow went off for it; a frame's difference is far less to see (2026-11-11).
-    if (!s.depth_copy || (s.depth_copied_frame != s.frame && s.depth_copied_frame + 1 != s.frame)) {
+    // Up to three frames old: the two a new depth of the same size waits to take over, and one more.
+    if (!s.depth_copy || s.depth_copied_frame > s.frame || s.frame - s.depth_copied_frame > 3) {
         s.why = "no copy of this frame's depth";
         return false;
     }
@@ -1484,7 +1485,12 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
         // The largest such buffer is the world's: the game keeps smaller, screen-shaped ones too (a
         // 960x540 one at 1080p, 2026-11-10). A smaller one takes over only once the one known has
         // not been seen for 30 presents (the screen got smaller).
-        if (s.main_depth && desc.Width * desc.Height <= UINT64{s.depth_width} * s.depth_height && s.main_missed < 30) return;
+        // One of the same size takes over after two: the game makes the world's depth anew when some of
+        // its settings change (the shadow and sky caches, held off after a change of time of day), and the
+        // snow went off for the 30 presents it waited (2026-11-12).
+        if (s.main_depth && desc.Width * desc.Height <= UINT64{s.depth_width} * s.depth_height &&
+            s.main_missed < (desc.Width == s.depth_width && desc.Height == s.depth_height ? 2u : 30u))
+            return;
         // None yet (the cover was resting): the screen's own size first; the 960x540 one came by first
         // and the cover went into a picture of another size until the big one took over (2026-11-11).
         if (!s.main_depth && desc.Width < s.width && s.main_missed < 30) return;
