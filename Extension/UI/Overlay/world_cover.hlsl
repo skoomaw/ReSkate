@@ -120,6 +120,25 @@ float noise(float2 p) {
 
 float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
+// The brightest of 16 samples of the picture round p on the same plane as `here` (as median_light
+// takes them): the ground in the light near a shadow. `fallback` when fewer than four are on it.
+float bright_around(int2 p, float3 here, float3 normal, float near_distance, float reach, float flat, float spin, float fallback) {
+    const int2 size = int2(up_width.w, back_height.w);
+    float most = 0;
+    int found = 0;
+    [unroll] for (int i = 0; i < 16; ++i) {
+        const float angle = spin + i * 2.3999632;
+        const float radius = reach * sqrt((i + 0.5) / 16.0);
+        const int2 at = clamp(p + int2(float2(cos(angle), sin(angle)) * radius), int2(0, 0), size - 1);
+        const float there = depth_at(at);
+        if (there > 0 && abs(dot(world_at(at, there, near_distance) - here, normal)) <= flat) {
+            most = max(most, luminance(scene.Load(int3(at, 0)).rgb));
+            ++found;
+        }
+    }
+    return found < 4 ? fallback : most;
+}
+
 // The middle brightness of 16 samples of the picture round p, on the same plane as `here` (within
 // `flat` metres of it along `normal`), reaching up to `reach` pixels, turned by `spin`: `fallback`
 // when fewer than four are on the plane.
@@ -363,9 +382,12 @@ Output ps_main(Vertex input) {
     // and smear in it, faint dark copies of moving things (and the skater's soft contact shadow) that
     // showed on the snow as ghost outlines and a dark disc. Snow scatters light: its shadows are pale.
     const float light = max(lerp(close, own, 0.1), wide * 0.6);
-    // Melting: in the light it goes first, in the shade (darker than the scene round about: a building's
-    // shadow) later; in patches, the thin places first, so it does not just fade out evenly.
-    const float shade = 1 - smoothstep(0.35, 0.75, light / max(exposure, 1e-4));
+    // Melting: in the light it goes first, in the shade later; in patches, the thin places first, so it
+    // does not just fade out evenly. The shade is the ground darker than the brightest of the same ground
+    // round it (a building's shadow on the street): not against the whole screen's brightness, which
+    // changed with where the camera looked and made the melt follow the view (2026-11-12).
+    const float sunlit = bright_around(p, here, normal, near_distance, back_height.w * 0.12, max(0.04, view_distance * 0.02), spin + 0.4, light);
+    const float shade = 1 - smoothstep(0.4, 0.65, close / max(sunlit, 1e-4));
     const float left = lerp(last_back.w, last_eye.w, shade);
     if (left < 0.999) {
         const float thin = noise(steady.xz * 0.9) * 0.55 + noise(steady.xz * 3.7) * 0.25;

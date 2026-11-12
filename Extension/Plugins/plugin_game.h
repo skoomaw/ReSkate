@@ -338,6 +338,9 @@ public:
     // The time of day forced on the map now (morning, noon, afternoon, evening, night, weatherday,
     // weathernight), "default" for the level's own, or empty with no map.
     virtual std::string time_of_day_now() { return {}; }
+    // The world controls the player has set in ReSkate's menu (fog, sky, wind and the detailed
+    // atmosphere values), one "key=value" a line; those at the level's own are left out.
+    virtual std::string world_controls_text() { return {}; }
     // Up to three places kept clear of that cover for the next 300 ms (world_cover::keep_clear): an
     // upright cylinder each, on its foot in the world. Only for the plugin whose cover it is.
     struct CoverClear {

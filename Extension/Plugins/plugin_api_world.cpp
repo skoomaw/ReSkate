@@ -828,6 +828,15 @@ struct WorldApi {
         }
         return 1;
     }
+    // controls_text(): the world controls the player has set in ReSkate's menu (fog, sky, wind and the
+    // detailed atmosphere values) as text, one "key=value" a line; empty when none is set.
+    static int controls_text(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "world.environment", "reskate.world.controls_text");
+        const auto text = game_of(plugin).world_controls_text();
+        lua_pushlstring(L, text.data(), text.size());
+        return 1;
+    }
     // ---- travel ------------------------------------------------------------------------------------
     static int locations(lua_State* L) {
         auto& plugin = plugin_of(L);
@@ -3513,7 +3522,8 @@ void WorldApi::install(Plugin& plugin, lua_State* L) {
     add_functions(L, "entities", {{"set", entities_set}, {"remove", entities_remove}, {"clear", entities_clear}, {"status", entities_status},
                                   {"ready", entities_ready}, {"blueprints", entities_blueprints},
                                   {"bounds", entities_bounds}});
-    add_functions(L, "world", {{"set_time", set_time}, {"time", time_now}, {"set_control", set_control}, {"set_park", set_park}, {"controls", controls}, {"pick", world_pick}, {"probe", world_probe}});
+    add_functions(L, "world", {{"set_time", set_time}, {"time", time_now}, {"set_control", set_control}, {"set_park", set_park}, {"controls", controls},
+                               {"controls_text", controls_text}, {"pick", world_pick}, {"probe", world_probe}});
     add_functions(L, "travel", {{"locations", locations}, {"levels", levels}, {"go", go}, {"load", load}});
     add_functions(L, "ai", {{"spawn", ai_spawn}, {"clear", ai_clear}, {"count", ai_count}});
     add_functions(L, "session", {{"skaters", skaters}, {"tag", tag}, {"nametags", nametags}, {"joint", session_joint}, {"touch", session_touch},

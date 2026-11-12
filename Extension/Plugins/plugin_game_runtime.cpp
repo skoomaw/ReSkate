@@ -2241,6 +2241,18 @@ private:
     static std::string reply(const std::string& answer) {
         return answer.starts_with("error") || answer.find("not") != std::string::npos ? answer : std::string{};
     }
+    std::string world_controls_text() override {
+        const auto c = local_profile_world_controls().choices;
+        std::string text;
+        const auto line = [&](std::string_view key, double value) {
+            if (value >= 0) text += std::format("{}={}\n", key, value);
+        };
+        line("fog", c.fog), line("fog_distance", c.fog_distance), line("sky_brightness", c.sky_brightness), line("clouds", c.clouds);
+        line("wind_strength", c.wind_strength), line("wind_direction", c.wind_direction);
+        for (const auto& [key, value] : c.atmosphere)
+            if (const auto* control = find_atmosphere_control(key)) text += key + "=" + atmosphere_value_text(*control, value) + "\n";
+        return text;
+    }
     std::string time_of_day_now() override {
         static constexpr std::array<std::string_view, 8> times{"default", "morning", "noon", "afternoon", "evening", "night",
                                                                "weatherday", "weathernight"};

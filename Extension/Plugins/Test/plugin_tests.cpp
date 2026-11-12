@@ -398,6 +398,7 @@ struct FakeGame final : Game {
     }
     std::string tod_now = "afternoon";
     std::string time_of_day_now() override { return tod_now; }
+    std::string world_controls_text() override { return "fog=1\nfog_distance=0.5\n"; }
     std::optional<WorldCover> cover_asked;
     std::optional<std::uint32_t> surface_set;
     std::uint32_t surface_fields{};
@@ -1504,6 +1505,7 @@ void the_time_of_day_is_read_and_the_cover_melts() {
     Host host(environment, Side::client);
     host.apply({script("melt", R"(
         assert(reskate.world.time() == "afternoon")
+        assert(reskate.world.controls_text() == "fog=1\nfog_distance=0.5\n")
         assert(reskate.effects.cover({left_sun = 0.25, left_shade = 0.75}))
         assert(not pcall(reskate.effects.cover, {left_sun = 2}), "left_sun is 0 to 1")
     )", R"("world.environment", "effects")")});
