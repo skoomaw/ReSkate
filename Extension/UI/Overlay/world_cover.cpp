@@ -143,6 +143,10 @@ struct Shared {
     bool depth_elsewhere{}; // a list for another queue changed the depth's state this frame
     bool main_seen{};      // the main depth went through a barrier since the last present
     unsigned main_missed{}; // presents in a row it did not: after 30 another may take its place
+    // One of the same size seen in its place, and in how many frames in a row (it takes over after 3).
+    ID3D12Resource* candidate{};
+    std::uint64_t candidate_frame{};
+    unsigned candidate_run{};
     bool unsafe{};         // this frame's colour or depth went through a split or aliasing barrier
     bool pending{};        // the world was drawn in a submitted batch, the cover not yet
     bool drawn{};          // the cover is drawn this frame
@@ -873,8 +877,9 @@ bool record_cover(Shared& s) {
     // Our copy of the game's depth, taken this frame as soon as the game had finished it.
     // Else the last frame's, still there: a frame now and then had none (the depth not readable when
     // its batch went), and the snow went off for it; a frame's difference is far less to see (2026-11-11).
-    // Up to three frames old: the two a new depth of the same size waits to take over, and one more.
-    if (!s.depth_copy || s.depth_copied_frame > s.frame || s.frame - s.depth_copied_frame > 3) {
+    // Up to six frames old: the few a new depth of the same size waits to take over (two missed, three
+    // seen), and one more.
+    if (!s.depth_copy || s.depth_copied_frame > s.frame || s.frame - s.depth_copied_frame > 6) {
         s.why = "no copy of this frame's depth";
         return false;
     }
@@ -1216,6 +1221,8 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
                 if (s.main_depth_hold) s.retiring.push_back({s.fence_value, s.main_depth_hold});
                 s.main_depth_hold.Reset();
                 s.main_depth = nullptr;
+                s.candidate = nullptr;
+                s.candidate_run = 0;
                 main_depth_now.store(nullptr);
                 for (auto& handle : depth_handles) handle.store(0);
                 s.depth_state_known = false;
@@ -1346,6 +1353,8 @@ void release() noexcept {
         s.queue = nullptr;
         s.colour = nullptr;
         s.main_depth = nullptr;
+        s.candidate = nullptr;
+        s.candidate_run = 0;
         s.main_depth_hold.Reset();
         main_depth_now.store(nullptr);
         s.depth_state_known = false;
@@ -1485,12 +1494,24 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
         // The largest such buffer is the world's: the game keeps smaller, screen-shaped ones too (a
         // 960x540 one at 1080p, 2026-11-10). A smaller one takes over only once the one known has
         // not been seen for 30 presents (the screen got smaller).
-        // One of the same size takes over after two: the game makes the world's depth anew when some of
-        // its settings change (the shadow and sky caches, held off after a change of time of day), and the
-        // snow went off for the 30 presents it waited (2026-11-12).
-        if (s.main_depth && desc.Width * desc.Height <= UINT64{s.depth_width} * s.depth_height &&
-            s.main_missed < (desc.Width == s.depth_width && desc.Height == s.depth_height ? 2u : 30u))
+        // One of the same size takes over once the one known has been missed for two presents and it has
+        // been seen in three frames in a row: the game makes the world's depth anew when some of its
+        // settings change (the shadow and sky caches, held off after a change of time of day), and the
+        // snow went off for the 30 presents it waited. Taken after two alone, a depth the game used for
+        // half a second meanwhile was taken first, and the snow thinned out until the real one came
+        // (2026-11-12).
+        const bool same_size = desc.Width == s.depth_width && desc.Height == s.depth_height;
+        if (s.main_depth && same_size && resource != s.main_depth) {
+            if (resource != s.candidate) s.candidate = resource, s.candidate_run = 1;
+            else if (s.candidate_frame + 1 == s.frame) ++s.candidate_run;
+            else if (s.candidate_frame != s.frame) s.candidate_run = 1;
+            s.candidate_frame = s.frame;
+            if (s.main_missed < 2 || s.candidate_run < 3) return;
+        } else if (s.main_depth && desc.Width * desc.Height <= UINT64{s.depth_width} * s.depth_height && s.main_missed < 30) {
             return;
+        }
+        s.candidate = nullptr;
+        s.candidate_run = 0;
         // None yet (the cover was resting): the screen's own size first; the 960x540 one came by first
         // and the cover went into a picture of another size until the big one took over (2026-11-11).
         if (!s.main_depth && desc.Width < s.width && s.main_missed < 30) return;
