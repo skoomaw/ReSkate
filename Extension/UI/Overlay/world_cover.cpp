@@ -1129,11 +1129,18 @@ void keep_clear(std::vector<Clear> places) noexcept {
 void allow(bool playing) noexcept {
     const std::uint64_t now = GetTickCount64();
     static std::uint64_t last_allowed{}; // when the cover was last allowed
+    static std::uint64_t stopped_since{}; // when the level stopped being in play (0: it is)
     if (!playing) {
+        // Off only once it has been so for a quarter of a second: the game said so for a single frame
+        // now and then, and the cover went off, and its depth was given up and found again, so the snow
+        // blinked out for a moment (2026-11-12). A menu opened is off a moment later.
+        if (!stopped_since) stopped_since = now;
+        if (allowed.load() && now - stopped_since < 250) return;
         playing_since = 0;
         allowed.store(false);
         return;
     }
+    stopped_since = 0;
     // Back within a few seconds of being drawn (a teleport, a menu opened and closed): at once. The
     // wait is for the front page and a level loading, which take longer; a teleport took the snow
     // away for two seconds (2026-11-11).
