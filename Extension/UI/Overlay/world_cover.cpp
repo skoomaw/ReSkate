@@ -107,6 +107,7 @@ struct Notes {
     D3D12_RESOURCE_STATES colour_state{};
     bool depth_state_known{};
     D3D12_RESOURCE_STATES depth_state{}; // the main depth's state when the list ends
+    bool depth_whole{};    // that barrier was on the whole buffer (both planes: depth and stencil)
     bool unsafe{};         // a split or aliasing barrier on the colour or depth: no cover this frame
     std::uint64_t last_written{}; // the kind (format, flags, compute or drawn) of the last full-size float picture written on it
     // The frame's last list: the screen goes from PRESENT to a render target on it, and the float
@@ -139,6 +140,17 @@ struct Shared {
     D3D12_RESOURCE_STATES colour_state{};
     bool depth_state_known{};
     D3D12_RESOURCE_STATES depth_state{}; // the main depth's state after the lists submitted so far
+    bool depth_whole{};    // its last barrier was on the whole buffer: the stencil plane is in that state too
+    // The stencil test (a test build): now and then the stencil plane of the world's depth is copied
+    // back and said in the log, the whole screen's values and those on a column through the skater, to
+    // see whether the game marks the skater there (no snow on exactly those pixels, then).
+    ComPtr<ID3D12Resource> stencil_readback;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT stencil_layout{};
+    UINT64 stencil_fence{};
+    bool stencil_pending{};
+    std::uint64_t stencil_next{120};
+    unsigned stencil_reports{};
+    std::vector<std::array<int, 3>> stencil_points; // x, y, and what it is: 0 the skater, 1 the ground beside them
     bool depth_elsewhere{}; // a list for another queue changed the depth's state this frame
     bool main_seen{};      // the main depth went through a barrier since the last present
     unsigned main_missed{}; // presents in a row it did not: after 30 another may take its place
@@ -376,6 +388,7 @@ void STDMETHODCALLTYPE hooked_render_pass(ID3D12GraphicsCommandList4* list, UINT
 
 bool record_cover(Shared& s);
 bool snapshot_depth(Shared& s, ID3D12CommandQueue* queue, ExecuteFn original);
+bool stencil_request(Shared& s, ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_DESC& d);
 bool depth_shaped(const D3D12_RESOURCE_DESC& d, std::uint32_t width, std::uint32_t height);
 
 void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
@@ -436,6 +449,7 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
             if (n.depth_state_known) {
                 s.depth_state_known = true;
                 s.depth_state = n.depth_state;
+                s.depth_whole = n.depth_whole;
                 depth_finished = true; // copied once this batch has run, if it is readable now
             }
             if (n.unsafe) s.unsafe = true;
@@ -723,6 +737,107 @@ DXGI_FORMAT depth_read_format(Shared& s, const D3D12_RESOURCE_DESC& d) {
     return DXGI_FORMAT_UNKNOWN;
 }
 
+// The stencil test. Under the lock, on our depth copy's list: the world's depth's stencil plane
+// copied into a readback buffer, about every three seconds and at most 20 times, while the whole
+// buffer is in a state the game left readable (moved to COPY_SOURCE and back on our list, as the
+// depth tap does). The points to read are worked out now, from the camera and the skater's place.
+bool stencil_request(Shared& s, ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_DESC& d) {
+    if (s.stencil_pending || s.stencil_reports >= 20 || s.frame < s.stencil_next || !s.depth_whole) return false;
+    if (d.Format != DXGI_FORMAT_R32G8X24_TYPELESS && d.Format != DXGI_FORMAT_D32_FLOAT_S8X24_UINT &&
+        d.Format != DXGI_FORMAT_R24G8_TYPELESS && d.Format != DXGI_FORMAT_D24_UNORM_S8_UINT)
+        return false;
+    std::vector<Clear> clear;
+    {
+        auto& a = asked();
+        std::lock_guard lock(a.mutex);
+        if (GetTickCount64() < a.clear_until) clear = a.clear;
+    }
+    const auto projector = plugin_camera::projector(static_cast<float>(d.Width), static_cast<float>(d.Height));
+    if (clear.empty() || !projector) return false;
+    // A column up the skater (their place's foot, 0.1 to 1.9 m up) and points on the ground either side.
+    s.stencil_points.clear();
+    const auto& foot = clear[0].foot;
+    const auto put = [&](float x, float y, float z, int what) {
+        const auto at = projector->project({x, y, z});
+        if (at && (*at)[0] >= 0 && (*at)[1] >= 0 && (*at)[0] < static_cast<float>(d.Width) && (*at)[1] < static_cast<float>(d.Height))
+            s.stencil_points.push_back({static_cast<int>((*at)[0]), static_cast<int>((*at)[1]), what});
+    };
+    for (int i = 0; i < 10; ++i) put(foot[0], foot[1] + 0.1f + i * 0.2f, foot[2], 0);
+    for (const float off : {-1.5f, -1.0f, 1.0f, 1.5f}) {
+        put(foot[0] + off, foot[1], foot[2], 1);
+        put(foot[0], foot[1], foot[2] + off, 1);
+    }
+    if (s.stencil_points.empty()) return false;
+    D3D12_RESOURCE_DESC plane = d;
+    UINT64 total{};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
+    s.device->GetCopyableFootprints(&plane, 1, 1, 0, &layout, nullptr, nullptr, &total);
+    if (!total) return false;
+    if (!s.stencil_readback || s.stencil_readback->GetDesc().Width < total) {
+        if (s.stencil_readback) s.retiring.push_back({s.fence_value, s.stencil_readback});
+        s.stencil_readback.Reset();
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC bytes{};
+        bytes.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bytes.Width = total;
+        bytes.Height = 1;
+        bytes.DepthOrArraySize = 1;
+        bytes.MipLevels = 1;
+        bytes.SampleDesc.Count = 1;
+        bytes.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(s.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bytes, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                     IID_PPV_ARGS(&s.stencil_readback)))) {
+            s.stencil_reports = 20;
+            logging::write(logging::Level::info, logging::Channel::graphics, "World cover stencil test: no readback buffer could be made.");
+            return false;
+        }
+    }
+    s.stencil_layout = layout;
+    transition(list, s.main_depth, s.depth_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION to{};
+    to.pResource = s.stencil_readback.Get();
+    to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    to.PlacedFootprint = layout;
+    D3D12_TEXTURE_COPY_LOCATION from{};
+    from.pResource = s.main_depth;
+    from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    from.SubresourceIndex = 1; // the stencil plane
+    list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    transition(list, s.main_depth, D3D12_RESOURCE_STATE_COPY_SOURCE, s.depth_state);
+    return true;
+}
+// Under the lock, each present: a stencil copy the GPU has finished, said in the log.
+void stencil_report(Shared& s) {
+    if (!s.stencil_pending || !s.fence || s.fence->GetCompletedValue() < s.stencil_fence) return;
+    s.stencil_pending = false;
+    s.stencil_next = s.frame + 180;
+    ++s.stencil_reports;
+    void* mapped{};
+    const D3D12_RANGE read{0, static_cast<SIZE_T>(s.stencil_layout.Offset + UINT64{s.stencil_layout.Footprint.RowPitch} * s.stencil_layout.Footprint.Height)};
+    if (FAILED(s.stencil_readback->Map(0, &read, &mapped)) || !mapped) return;
+    const auto* bytes = static_cast<const std::uint8_t*>(mapped) + s.stencil_layout.Offset;
+    const auto& f = s.stencil_layout.Footprint;
+    // One byte a pixel for the stencil plane's copy; wider formats give their first byte.
+    const UINT step = std::max<UINT>(1, f.Format == DXGI_FORMAT_R8_UINT || f.Format == DXGI_FORMAT_R8_TYPELESS ? 1 : 4);
+    std::array<std::uint64_t, 256> counts{};
+    for (UINT y = 0; y < f.Height; y += 2)
+        for (UINT x = 0; x < f.Width; x += 2) ++counts[bytes[UINT64{y} * f.RowPitch + UINT64{x} * step]];
+    std::string line = std::format("World cover stencil test {}: plane format {}, {}x{}; values over the screen:", s.stencil_reports,
+                                   static_cast<unsigned>(f.Format), f.Width, f.Height);
+    for (int v = 0; v < 256; ++v)
+        if (counts[v]) line += std::format(" {}x{}", v, counts[v]);
+    line += "; up the skater:";
+    for (const auto& p : s.stencil_points)
+        if (p[2] == 0) line += std::format(" {}", bytes[UINT64(p[1]) * f.RowPitch + UINT64(p[0]) * step]);
+    line += "; the ground beside them:";
+    for (const auto& p : s.stencil_points)
+        if (p[2] == 1) line += std::format(" {}", bytes[UINT64(p[1]) * f.RowPitch + UINT64(p[0]) * step]);
+    const D3D12_RANGE none{0, 0};
+    s.stencil_readback->Unmap(0, &none);
+    logging::write(logging::Level::info, logging::Channel::graphics, line);
+}
+
 // Under the lock, right after a batch of the game's in which its depth became readable: our list
 // draws it into our copy (read where it is, in the state the game left it; nothing of the game's is
 // moved or written). The cover reads the copy later in the frame. The copy taken last before the
@@ -802,11 +917,16 @@ bool snapshot_depth(Shared& s, ID3D12CommandQueue* queue, ExecuteFn original) {
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     list->DrawInstanced(3, 1, 0, 0);
     transition(list, s.depth_copy.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    const bool stencil = stencil_request(s, list, d);
     if (FAILED(list->Close())) return false;
     ID3D12CommandList* ours[] = {list};
     original(queue, 1, ours);
     queue->Signal(s.fence.Get(), ++s.fence_value);
     s.allocator_fence[at] = s.fence_value;
+    if (stencil) {
+        s.stencil_fence = s.fence_value;
+        s.stencil_pending = true;
+    }
     s.depth_copied_frame = s.frame;
     return true;
 }
@@ -1195,6 +1315,7 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
                            "World cover: the world's last drawing was in the frame's last batch, so the cover had no place before post-processing.");
         }
         s.width = width, s.height = height;
+        stencil_report(s);
         s.main_missed = s.main_seen ? 0 : s.main_missed + 1;
         // How this frame went, counted; every 600 frames (the first eight times) said in the log.
         if (s.main_depth) {
@@ -1425,6 +1546,7 @@ void on_barrier(ID3D12GraphicsCommandList* list, const D3D12_RESOURCE_BARRIER& b
             if (b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) n.unsafe = true;
             n.depth_state_known = true;
             n.depth_state = b.Transition.StateAfter;
+            n.depth_whole = b.Transition.Subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             return;
         }
         // Which depth buffer is the world's: the first screen-shaped one each frame that goes from being
