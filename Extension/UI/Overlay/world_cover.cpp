@@ -32,19 +32,15 @@ constexpr std::size_t list_set_targets = 46, list_begin_render_pass = 68, queue_
 // root signature holds 64 values at most, and the descriptor table takes one.
 constexpr UINT constant_count = 60;
 constexpr std::size_t most_clear = 3;
-// How much of this frame's cover goes into what is shown, the rest last frame's (world_cover.hlsl).
-// All of it: last frame's cover is found with the camera as the client last read it, which can be a
-// frame apart from the one the GPU drew with, and everything that moved left an outline of itself in
-// the snow (2026-11-10). The history is still written, for when the GPU's own camera is known.
-constexpr float this_frame_share = 1.0f;
-constexpr DXGI_FORMAT history_format = DXGI_FORMAT_R16G16_FLOAT;
 // Our copy of the game's depth, taken as soon as the game has finished it each frame (snapshot_depth):
 // read at the cover's moment the game's own had sometimes been used for something else by then, and
 // the snow vanished for a frame or came out in stripes (2026-11-11).
 constexpr DXGI_FORMAT depth_copy_format = DXGI_FORMAT_R32_FLOAT;
 // Each command allocator's own shader views in our heap (a list in flight reads its own): the
-// picture's copy, our depth copy, last frame's cover.
-constexpr UINT views_each = 3;
+// picture's copy and our depth copy. Each frame's cover is drawn afresh: blended with last frame's,
+// found with the camera as the client last read it (a frame apart from the GPU's at times), everything
+// that moved left an outline of itself in the snow (2026-11-10).
+constexpr UINT views_each = 2;
 // The cameras the measurement tries (world_cover.hlsl's ps_measure): only the one read now. Trying the
 // two before as well and drawing with whichever agreed best chose a different one every few seconds
 // (their agreement differed by noise), and every change moved the whole cover by a frame (2026-11-11).
@@ -156,7 +152,6 @@ struct Shared {
     D3D12_RESOURCE_DESC picture_desc{};
     // The cover as drawn (how much, and how far): two, one read as last frame's and one written, swapped
     // each frame; and the camera it was drawn from.
-    std::array<ComPtr<ID3D12Resource>, 2> history;
     // What the GPU may still be using when it is replaced: kept until the fence passes the value the
     // last list that could use it signals. Freed at once, a frame in flight read freed memory and the
     // whole picture came out in stripes (2026-11-11).
@@ -167,7 +162,6 @@ struct Shared {
     ComPtr<ID3D12Resource> depth_copy;
     ComPtr<ID3D12PipelineState> depth_pipeline;
     std::uint64_t depth_copied_frame{~std::uint64_t{0}}; // the frame our depth copy was taken in
-    std::size_t history_at{};
     std::array<float, 12> last_camera{};
     std::uint64_t last_drawn_frame{~std::uint64_t{0}};
     ComPtr<ID3D12DescriptorHeap> views, targets;
@@ -497,7 +491,7 @@ bool build_root(Shared& s) {
     {
         D3D12_DESCRIPTOR_RANGE range{};
         range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        range.NumDescriptors = 3; // t0 the picture, t1 the game's depth, t2 last frame's cover
+        range.NumDescriptors = 2; // t0 the picture, t1 the game's depth
         std::array<D3D12_ROOT_PARAMETER, 3> parameters{};
         parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         parameters[0].Constants.Num32BitValues = constant_count;
@@ -509,17 +503,9 @@ bool build_root(Shared& s) {
         parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; // t3: the cameras
         parameters[2].Descriptor.ShaderRegister = 3;
         parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-        D3D12_STATIC_SAMPLER_DESC sampler{};
-        sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-        sampler.MaxLOD = 0.0f;
-        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         D3D12_ROOT_SIGNATURE_DESC description{};
         description.NumParameters = static_cast<UINT>(parameters.size());
         description.pParameters = parameters.data();
-        description.NumStaticSamplers = 1;
-        description.pStaticSamplers = &sampler;
         description.Flags = D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS | D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
                             D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
         ComPtr<ID3DBlob> blob, error;
@@ -588,10 +574,8 @@ bool build_pipeline(Shared& s, DXGI_FORMAT format) {
     description.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     description.RasterizerState.DepthClipEnable = TRUE;
     description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    description.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    description.NumRenderTargets = 2;
+    description.NumRenderTargets = 1;
     description.RTVFormats[0] = format;
-    description.RTVFormats[1] = history_format;
     description.SampleDesc.Count = 1;
     if (FAILED(s.device->CreateGraphicsPipelineState(&description, IID_PPV_ARGS(&s.pipeline)))) {
         say_failed("its pipeline was refused for the world's picture's format.");
@@ -640,7 +624,7 @@ bool build_list(Shared& s) {
         views.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         D3D12_DESCRIPTOR_HEAP_DESC targets{};
         targets.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        targets.NumDescriptors = 5; // the picture, the two covers, our depth copy, the measurements
+        targets.NumDescriptors = 5; // the picture, (1, 2 free), our depth copy, the measurements
         if (FAILED(s.device->CreateDescriptorHeap(&views, IID_PPV_ARGS(&s.views))) || FAILED(s.device->CreateDescriptorHeap(&targets, IID_PPV_ARGS(&s.targets)))) {
             say_failed("no descriptor heaps.");
             return false;
@@ -696,18 +680,6 @@ bool build_resources(Shared& s, const D3D12_RESOURCE_DESC& colour) {
             return false;
         }
         s.picture_desc = desc;
-        // The two covers, the picture's size: made shader-readable (the first frame reads none).
-        desc.Format = history_format;
-        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-        for (auto& h : s.history) {
-            if (h) s.retiring.push_back({s.fence_value, h});
-            h.Reset();
-            if (FAILED(s.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
-                                                         IID_PPV_ARGS(&h)))) {
-                say_failed("no cover history could be made.");
-                return false;
-            }
-        }
         s.last_drawn_frame = ~std::uint64_t{0};
     }
     return true;
@@ -988,28 +960,16 @@ bool record_cover(Shared& s) {
     depth_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     depth_view.Texture2D.MipLevels = 1;
     s.device->CreateShaderResourceView(s.depth_copy.Get(), &depth_view, view);
-    // Last frame's cover (read) and this frame's (written); last frame's counts only if it was drawn on
-    // the frame before this one, at this size.
-    auto* const read_cover = s.history[1 - s.history_at].Get();
-    auto* const write_cover = s.history[s.history_at].Get();
+    // Last frame's camera counts (for the flakes' streaks) only if the cover was drawn on the frame
+    // before this one.
     const bool have_last = s.last_drawn_frame + 1 == s.frame;
-    view.ptr += view_step;
-    D3D12_SHADER_RESOURCE_VIEW_DESC cover_view{};
-    cover_view.Format = history_format;
-    cover_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    cover_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    cover_view.Texture2D.MipLevels = 1;
-    s.device->CreateShaderResourceView(read_cover, &cover_view, view);
-    // Targets: the picture, then this frame's cover. Made without our hook: it takes the lock held here.
+    // The target: the picture. Made without our hook: it takes the lock held here.
     D3D12_RENDER_TARGET_VIEW_DESC target_view{};
     target_view.Format = s.colour_format;
     target_view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
     const UINT target_step = s.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 2> targets{s.targets->GetCPUDescriptorHandleForHeapStart(), D3D12_CPU_DESCRIPTOR_HANDLE{}};
-    targets[1].ptr = targets[0].ptr + target_step;
-    original_rtv.load()(s.device, s.colour, &target_view, targets[0]);
-    target_view.Format = history_format;
-    original_rtv.load()(s.device, write_cover, &target_view, targets[1]);
+    const auto target = s.targets->GetCPUDescriptorHandleForHeapStart();
+    original_rtv.load()(s.device, s.colour, &target_view, target);
 
     auto* list = s.list.Get();
     const auto before = s.colour_state;
@@ -1017,7 +977,6 @@ bool record_cover(Shared& s) {
     list->CopyResource(s.picture.Get(), s.colour);
     transition(list, s.picture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     transition(list, s.colour, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    transition(list, write_cover, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
     // A change of the distance held slides the snow's pattern over half a second instead of jumping it.
     if (s.held_near <= 0 || s.shown_near <= 0 || now < s.shown_near_at) {
@@ -1046,7 +1005,7 @@ bool record_cover(Shared& s) {
         static_cast<float>(std::min(clear.size(), most_clear)), 0, 0, 0, // then each place's height, below
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // the places' feet and radii, below
         s.last_camera[0], s.last_camera[1], s.last_camera[2], have_last ? 1.0f : 0.0f,
-        s.last_camera[3], s.last_camera[4], s.last_camera[5], this_frame_share,
+        s.last_camera[3], s.last_camera[4], s.last_camera[5], 0,
         s.last_camera[6], s.last_camera[7], s.last_camera[8], settings.left,
         s.last_camera[9], s.last_camera[10], s.last_camera[11], stopping_seconds};
     for (std::size_t i = 0; i < clear.size() && i < most_clear; ++i) {
@@ -1070,7 +1029,7 @@ bool record_cover(Shared& s) {
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(colour_desc.Width), static_cast<LONG>(colour_desc.Height)};
     list->RSSetViewports(1, &viewport);
     list->RSSetScissorRects(1, &scissor);
-    list->OMSetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), FALSE, nullptr);
+    list->OMSetRenderTargets(1, &target, FALSE, nullptr);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     list->DrawInstanced(3, 1, 0, 0);
 
@@ -1107,9 +1066,7 @@ bool record_cover(Shared& s) {
 
     transition(list, s.colour, D3D12_RESOURCE_STATE_RENDER_TARGET, before);
     transition(list, s.picture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-    transition(list, write_cover, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     if (FAILED(list->Close())) return false;
-    s.history_at = 1 - s.history_at;
     s.last_drawn_frame = s.frame;
     s.why = nullptr;
     return true;
@@ -1334,7 +1291,6 @@ void release() noexcept {
         s.fence.Reset();
         s.fence_value = 0;
         s.picture.Reset();
-        for (auto& h : s.history) h.Reset();
         s.retiring.clear(); // the overlay waits for the GPU before it tears down
         s.depth_copy.Reset();
         s.depth_pipeline.Reset();

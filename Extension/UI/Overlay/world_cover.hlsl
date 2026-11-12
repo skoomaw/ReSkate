@@ -1,8 +1,8 @@
 // A cover over the world's upward-facing surfaces (world_cover.cpp, reskate.effects.cover), drawn into
 // the finished scene just before the game puts it on the screen with its UI, and snow falling in front
 // of it. One full-screen triangle; t0 is a copy of that picture, t1 the game's own depth for it
-// (reversed: 1 near, 0 far: our copy of it, which ps_depth takes), t2 the cover as it was last frame (how much, and how far away), which
-// this pass writes again to its second target, and t3 the cameras ps_measure tries (a buffer).
+// (reversed: 1 near, 0 far: our copy of it, which ps_depth takes), and t3 the cameras ps_measure tries
+// (a buffer).
 
 cbuffer constants : register(b0) {
     float4 right_focal;   // the camera's right (world), and its focal length in pixels
@@ -14,23 +14,20 @@ cbuffer constants : register(b0) {
     float4 extra;         // sparkle, how far the snow has fallen (seconds at the usual speed), how much snow falls (0 to 1), how fast (1 the usual)
     float4 clear_info;    // how many places are kept clear (0 to 3), then each one's height above its foot
     float4 clears[3];     // each: its foot in the world, and its radius
-    float4 last_right;    // last frame's camera (as this frame's above), and whether last frame's cover is there
-    float4 last_up;       // ..., and how much of this frame's cover goes into what is shown (the rest is last frame's)
+    float4 last_right;    // last frame's camera (as this frame's above), and whether it is last frame's (for the flakes' streaks)
+    float4 last_up;       // ... (w unused)
     float4 last_back;     // ..., and how much of the cover is left (melting: 1 all of it)
     float4 last_eye;      // ..., and how long the snowfall has been stopping in seconds (-1: falling)
 };
 Texture2D<float4> scene : register(t0);
 Texture2D<float> depth : register(t1);
-Texture2D<float2> last_cover : register(t2);
 // The cameras ps_measure tries (world_cover.cpp's camera_candidates): each its right, up, back and eye.
 StructuredBuffer<float4> cameras : register(t3);
 #define CANDIDATES 1
-SamplerState linear_clamp : register(s0);
 
 struct Vertex { float4 position : SV_Position; };
 struct Output {
     float4 colour : SV_Target0;
-    float2 cover : SV_Target1; // how much cover, and the distance along the view it is at
 };
 
 // Our copy of the game's depth (world_cover.cpp, snapshot_depth): t1 is the game's own here.
@@ -247,7 +244,6 @@ Output ps_main(Vertex input) {
     const int2 p = int2(input.position.xy);
     const float4 under = scene.Load(int3(p, 0));
     out_.colour = under;
-    out_.cover = float2(0, 0);
     const float d = depth_at(p);
     // The near distance the CPU holds from the measurements of many frames (eye_near.w), else this
     // frame's own from the skater's foot; 0 when neither is known.
@@ -303,21 +299,6 @@ Output ps_main(Vertex input) {
         cover *= 1 - smoothstep(0.0015, 0.006, max(bend_across, bend_along) / d);
     }
 
-    // Steadier over time: last frame's cover where this point was then (off while this_frame_share in
-    // world_cover.cpp is 1: the camera it is found with can be a frame apart from the GPU's).
-    if (last_right.w > 0 && last_up.w < 1) {
-        const float3 to = here - last_eye.xyz;
-        const float then = dot(to, -last_back.xyz);
-        if (then > 0.05) {
-            const float2 at = float2(up_width.w * 0.5 + dot(to, last_right.xyz) * right_focal.w / then,
-                                     back_height.w * 0.5 - dot(to, last_up.xyz) * right_focal.w / then);
-            if (all(at >= 0) && at.x < up_width.w && at.y < back_height.w) {
-                const float2 last = last_cover.SampleLevel(linear_clamp, at / float2(up_width.w, back_height.w), 0);
-                if (last.y > 0 && abs(last.y - then) < then * 0.04) cover = lerp(last.x, cover, last_up.w);
-            }
-        }
-    }
-
     // Distances are only real when measured: the places kept clear need them.
     if (near_measured > 0 && cover > 0.002) {
         // The places kept clear (the skater): upright cylinders over their feet, softened at the edge.
@@ -355,7 +336,6 @@ Output ps_main(Vertex input) {
             cover *= 1 - inside * on_it;
         }
     }
-    out_.cover = float2(cover, view_distance);
     if (cover <= 0.002) {
         out_.colour.rgb = snowfall(shown, p, scene_distance, exposure);
         return out_;
