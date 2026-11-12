@@ -83,6 +83,7 @@ struct Asked {
     Settings settings;
     std::vector<Clear> clear;
     std::uint64_t clear_until{}; // keep_clear holds for 300 ms
+    std::uint64_t stopping_since{}; // when the snowfall began to stop (GetTickCount64), 0 while it falls
 };
 Asked& asked() { static auto* value = new Asked; return *value; }
 std::atomic<bool> wanted{};
@@ -921,11 +922,13 @@ bool record_cover(Shared& s) {
     Settings settings;
     std::vector<Clear> clear;
     const std::uint64_t now = GetTickCount64();
+    float stopping_seconds = -1; // how long the snowfall has been stopping, or -1 while it falls
     {
         auto& a = asked();
         std::lock_guard lock(a.mutex);
         settings = a.settings;
         if (now < a.clear_until) clear = a.clear;
+        if (a.stopping_since) stopping_seconds = static_cast<float>(now - a.stopping_since) / 1000.0f;
     }
     // The candidate cameras for ps_measure, into this command allocator's part of the upload buffer.
     {
@@ -1001,7 +1004,7 @@ bool record_cover(Shared& s) {
         s.last_camera[0], s.last_camera[1], s.last_camera[2], have_last ? 1.0f : 0.0f,
         s.last_camera[3], s.last_camera[4], s.last_camera[5], this_frame_share,
         s.last_camera[6], s.last_camera[7], s.last_camera[8], settings.left,
-        s.last_camera[9], s.last_camera[10], s.last_camera[11], 0};
+        s.last_camera[9], s.last_camera[10], s.last_camera[11], stopping_seconds};
     for (std::size_t i = 0; i < clear.size() && i < most_clear; ++i) {
         constants[29 + i] = clear[i].height;
         constants[32 + i * 4] = clear[i].foot[0];
@@ -1086,6 +1089,8 @@ void set(const Settings& settings) noexcept {
     auto& a = asked();
     {
         std::lock_guard lock(a.mutex);
+        if (settings.snowfall_stopping && !a.stopping_since) a.stopping_since = GetTickCount64();
+        if (!settings.snowfall_stopping) a.stopping_since = 0;
         a.settings = settings;
     }
     wanted.store(true);

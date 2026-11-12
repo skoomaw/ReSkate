@@ -17,7 +17,7 @@ cbuffer constants : register(b0) {
     float4 last_right;    // last frame's camera (as this frame's above), and whether last frame's cover is there
     float4 last_up;       // ..., and how much of this frame's cover goes into what is shown (the rest is last frame's)
     float4 last_back;     // ..., and how much of the cover is left (melting: 1 all of it)
-    float4 last_eye;
+    float4 last_eye;      // ..., and how long the snowfall has been stopping in seconds (-1: falling)
 };
 Texture2D<float4> scene : register(t0);
 Texture2D<float> depth : register(t1);
@@ -155,7 +155,7 @@ float median_light(int2 p, float3 here, float3 normal, float near_distance, floa
 // it moved against the camera over a frame (its fall, the wind, the camera's own move), the streak a
 // moving flake makes. Flakes placed by direction alone, round the camera, moved with it and looked like
 // a picture laid over the screen (2026-11-11).
-float flake_layer(float3 dir, float limit, float cell, float chance, float radius, float salt, float3 shift, float3 streak, float seconds) {
+float flake_layer(float3 dir, float limit, float cell, float chance, float radius, float salt, float3 shift, float3 streak, float seconds, float top) {
     const float3 o = (eye_near.xyz + shift) / cell; // the camera, in this layer's cells
     float3 c = floor(o);
     const float3 way = float3(dir.x >= 0 ? 1 : -1, dir.y >= 0 ? 1 : -1, dir.z >= 0 ? 1 : -1);
@@ -171,6 +171,7 @@ float flake_layer(float3 dir, float limit, float cell, float chance, float radiu
             float3 centre = c + 0.2 + seed.yzx * 0.6;
             centre.xz += float2(sin(seconds * (0.6 + seed.y) + seed.z * 6.2831853), cos(seconds * (0.5 + seed.z) + seed.y * 6.2831853)) * (0.06 / cell);
             const float3 a = centre * cell - shift - eye_near.xyz; // the flake against the camera, in metres
+            if (a.y <= top) { // above where the falling snow ends now, none falls any more
             // The nearest the ray comes to the flake's streak (a to a + streak).
             const float3 d = streak;
             const float dd = dot(d, d);
@@ -188,6 +189,7 @@ float flake_layer(float3 dir, float limit, float cell, float chance, float radiu
                 touch *= min(size / shown, 1.0) * (1.0 / (1.0 + streak_length * focal / along / (4.0 * shown)));
                 touch *= 1 - smoothstep(limit * 0.7, limit, along);           // fading out with distance
                 seen = max(seen, touch);
+            }
             }
         }
         // On to the next cell along the ray.
@@ -213,10 +215,14 @@ float3 snowfall(float3 colour, int2 p, float scene_distance, float exposure) {
     if (last_right.w > 0) moved += eye_near.xyz - last_eye.xyz;
     const float moved_length = length(moved);
     if (moved_length > 0.4) moved *= 0.4 / moved_length;    // a jump (a cut, a respawn) is not a streak
+    // Stopping: no new flakes; the highest one left falls at the flakes' speed from 12 m over the camera,
+    // so the last ones fall out of the sky instead of all going at once.
+    const float top = last_eye.w < 0 ? 1e6 : 12.0 - fall * last_eye.w;
+    if (top < -30.0) return colour;
     const float near_limit = min(scene_distance, 7.0);
     const float far_limit = min(scene_distance, 22.0);
-    float flakes = flake_layer(dir, near_limit, 0.45, amount * 0.45, 0.006, 0.5, shift, moved, seconds);
-    flakes = max(flakes, flake_layer(dir, far_limit, 1.3, amount * 0.6, 0.012, 17.5, shift, moved, seconds) * 0.8);
+    float flakes = flake_layer(dir, near_limit, 0.45, amount * 0.45, 0.006, 0.5, shift, moved, seconds, top);
+    flakes = max(flakes, flake_layer(dir, far_limit, 1.3, amount * 0.6, 0.012, 17.5, shift, moved, seconds, top) * 0.8);
     const float3 white = colour_amount.rgb * exposure * 1.6;
     return lerp(colour, white, saturate(flakes) * 0.85);
 }
@@ -250,10 +256,11 @@ Output ps_main(Vertex input) {
     const float3 here = world_at(p, d, near_distance);
     const float view_distance = dot(here - eye_near.xyz, -back_height.xyz);
     const float scene_distance = length(here - eye_near.xyz);
-    // The patchiness, from where the point is at a scale that never changes: with the measured one it
-    // jumped whenever the measurement came and went (the skater's feet in and out of view), and the
-    // snow flashed on and off with it (2026-11-10).
-    const float3 steady = world_at(p, d, 0.1);
+    // The patchiness, where the point really is: the near distance held from many frames (eye_near.w),
+    // not this frame's own, which came and went with the skater's feet and made the snow flash
+    // (2026-11-10). A fixed guess put the pattern at the wrong distance, and it slid over the ground as
+    // the camera moved, the melt's patches with it (2026-11-12). The guess only until one is held.
+    const float3 steady = world_at(p, d, eye_near.w > 0 ? eye_near.w : 0.1);
     // The surface's direction from its neighbours: on each axis the one nearer in depth, so an edge
     // against something further away does not bend it.
     const float dl = depth_at(p - int2(1, 0)), dr = depth_at(p + int2(1, 0));
@@ -368,8 +375,8 @@ Output ps_main(Vertex input) {
     // change of weather broke it (2026-11-12).
     const float left = last_back.w;
     if (left < 0.999) {
-        const float thin = noise(steady.xz * 0.9) * 0.55 + noise(steady.xz * 3.7) * 0.25;
-        cover *= smoothstep(thin, thin + 0.3, left * 1.2);
+        const float thin = noise(steady.xz * 0.9) * 0.6 + noise(steady.xz * 2.1) * 0.2;
+        cover *= smoothstep(thin - 0.2, thin + 0.4, left * 1.3);
         if (cover <= 0.002) {
             out_.colour.rgb = snowfall(shown, p, scene_distance, exposure);
             return out_;

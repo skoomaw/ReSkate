@@ -1284,6 +1284,7 @@ public:
         s.brightness = cover->brightness, s.breakup = cover->breakup, s.sparkle = cover->sparkle, s.snowfall = cover->snowfall;
         s.fall_speed = cover->fall_speed;
         s.left = cover->left;
+        s.snowfall_stopping = cover->snowfall_stopping;
         world_cover::set(s);
         return {};
     }

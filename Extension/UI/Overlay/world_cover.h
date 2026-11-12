@@ -44,6 +44,7 @@ struct Settings {
     float snowfall{0.0f};   // 0..1: snow falling in front of the world, none to heavy
     float fall_speed{1.0f}; // 0.1..4: how fast it falls, 1 about 1.1 m/s
     float left{1.0f};       // 0..1: how much of it is left (melting), the same everywhere
+    bool snowfall_stopping{}; // the snow stops falling: no new flakes, the last ones fall out
 };
 
 // A place kept clear of the cover: an upright cylinder `radius` wide standing on `foot` (the world),
