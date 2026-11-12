@@ -1283,7 +1283,7 @@ public:
         s.amount = cover->amount, s.facing = cover->facing, s.softness = cover->softness;
         s.brightness = cover->brightness, s.breakup = cover->breakup, s.sparkle = cover->sparkle, s.snowfall = cover->snowfall;
         s.fall_speed = cover->fall_speed;
-        s.left_sun = cover->left_sun, s.left_shade = cover->left_shade;
+        s.left = cover->left;
         world_cover::set(s);
         return {};
     }
@@ -2252,6 +2252,11 @@ private:
         for (const auto& [key, value] : c.atmosphere)
             if (const auto* control = find_atmosphere_control(key)) text += key + "=" + atmosphere_value_text(*control, value) + "\n";
         return text;
+    }
+    std::string set_atmosphere(const std::vector<std::pair<std::string, std::string>>& values) override {
+        for (const auto& [key, value] : values)
+            if (!set_local_atmosphere_control(key, value)) return key + " " + value + " was refused (no map, or not that value)";
+        return {};
     }
     std::string time_of_day_now() override {
         static constexpr std::array<std::string_view, 8> times{"default", "morning", "noon", "afternoon", "evening", "night",

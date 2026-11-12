@@ -1000,8 +1000,8 @@ bool record_cover(Shared& s) {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // the places' feet and radii, below
         s.last_camera[0], s.last_camera[1], s.last_camera[2], have_last ? 1.0f : 0.0f,
         s.last_camera[3], s.last_camera[4], s.last_camera[5], this_frame_share,
-        s.last_camera[6], s.last_camera[7], s.last_camera[8], settings.left_sun,
-        s.last_camera[9], s.last_camera[10], s.last_camera[11], settings.left_shade};
+        s.last_camera[6], s.last_camera[7], s.last_camera[8], settings.left,
+        s.last_camera[9], s.last_camera[10], s.last_camera[11], 0};
     for (std::size_t i = 0; i < clear.size() && i < most_clear; ++i) {
         constants[29 + i] = clear[i].height;
         constants[32 + i * 4] = clear[i].foot[0];

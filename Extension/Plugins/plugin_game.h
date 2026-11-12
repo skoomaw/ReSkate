@@ -332,7 +332,7 @@ public:
     struct WorldCover {
         std::array<float, 3> colour{0.92f, 0.95f, 1.0f};
         float amount{1}, facing{0.55f}, softness{0.15f}, brightness{1.6f}, breakup{0.35f}, sparkle{0}, snowfall{0}, fall_speed{1};
-        float left_sun{1}, left_shade{1}; // how much of it is left in the light and in the shade (melting), 0..1
+        float left{1}; // how much of it is left (melting), 0..1, the same everywhere
     };
     virtual std::string world_cover(std::string_view /*plugin*/, std::optional<WorldCover>) { return unavailable; }
     // The time of day forced on the map now (morning, noon, afternoon, evening, night, weatherday,
@@ -341,6 +341,10 @@ public:
     // The world controls the player has set in ReSkate's menu (fog, sky, wind and the detailed
     // atmosphere values), one "key=value" a line; those at the level's own are left out.
     virtual std::string world_controls_text() { return {}; }
+    // Atmosphere values (the detailed fog, sky and wind ones, as world_controls_text names them) set
+    // together, each a value as text or "default" for the level's own; saved in the player's profile
+    // as the menu's are. Empty, or what was refused.
+    virtual std::string set_atmosphere(const std::vector<std::pair<std::string, std::string>>&) { return unavailable; }
     // Up to three places kept clear of that cover for the next 300 ms (world_cover::keep_clear): an
     // upright cylinder each, on its foot in the world. Only for the plugin whose cover it is.
     struct CoverClear {

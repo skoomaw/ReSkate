@@ -399,6 +399,11 @@ struct FakeGame final : Game {
     std::string tod_now = "afternoon";
     std::string time_of_day_now() override { return tod_now; }
     std::string world_controls_text() override { return "fog=1\nfog_distance=0.5\n"; }
+    std::vector<std::pair<std::string, std::string>> atmosphere_set;
+    std::string set_atmosphere(const std::vector<std::pair<std::string, std::string>>& values) override {
+        atmosphere_set.insert(atmosphere_set.end(), values.begin(), values.end());
+        return {};
+    }
     std::optional<WorldCover> cover_asked;
     std::optional<std::uint32_t> surface_set;
     std::uint32_t surface_fields{};
@@ -1506,12 +1511,13 @@ void the_time_of_day_is_read_and_the_cover_melts() {
     host.apply({script("melt", R"(
         assert(reskate.world.time() == "afternoon")
         assert(reskate.world.controls_text() == "fog=1\nfog_distance=0.5\n")
-        assert(reskate.effects.cover({left_sun = 0.25, left_shade = 0.75}))
-        assert(not pcall(reskate.effects.cover, {left_sun = 2}), "left_sun is 0 to 1")
+        assert(reskate.world.set_atmosphere({["Fog.Enable"] = 1, ["Fog.FogColor"] = "0,1450,2500"}))
+        assert(not pcall(reskate.world.set_atmosphere, {["Fog.Enable"] = true}), "a value is a number or text")
+        assert(reskate.effects.cover({left = 0.25}))
+        assert(not pcall(reskate.effects.cover, {left = 2}), "left is 0 to 1")
     )", R"("world.environment", "effects")")});
     running(host, "melt", environment);
-    check(environment.fake.cover_asked && environment.fake.cover_asked->left_sun == 0.25f && environment.fake.cover_asked->left_shade == 0.75f,
-          "a cover's melt is passed on: how much is left in the light and in the shade");
+    check(environment.fake.cover_asked && environment.fake.cover_asked->left == 0.25f, "a cover's melt is passed on: how much of it is left");
     TestEnvironment denied_environment;
     Host denied(denied_environment, Side::client);
     denied.apply({script("melt-denied", R"(

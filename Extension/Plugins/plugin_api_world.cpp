@@ -837,6 +837,28 @@ struct WorldApi {
         lua_pushlstring(L, text.data(), text.size());
         return 1;
     }
+    // set_atmosphere({["Fog.Enable"] = 1, ["Fog.FogColor"] = "0,1450,2500", ...}): atmosphere values (as
+    // controls_text names them) set together, each a number, "a,b,c" lanes, or "default" for the level's
+    // own; saved in the player's profile as the menu's are. At most 64, one change of the four a second.
+    static int set_atmosphere(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "world.environment", "reskate.world.set_atmosphere");
+        luaL_checktype(L, 1, LUA_TTABLE);
+        std::vector<std::pair<std::string, std::string>> values;
+        lua_pushnil(L);
+        while (lua_next(L, 1)) {
+            if (lua_type(L, -2) != LUA_TSTRING) luaL_error(L, "an atmosphere value's key is its name");
+            std::size_t key_length{}, value_length{};
+            const char* key = lua_tolstring(L, -2, &key_length);
+            if (lua_type(L, -1) != LUA_TSTRING && lua_type(L, -1) != LUA_TNUMBER) luaL_error(L, "an atmosphere value is a number or text");
+            const char* value = lua_tolstring(L, -1, &value_length); // a number becomes its text here
+            if (key_length > 60 || value_length > 120 || values.size() >= 64) luaL_error(L, "at most 64 atmosphere values, each a short name and value");
+            values.emplace_back(std::string(key, key_length), std::string(value, value_length));
+            lua_pop(L, 1);
+        }
+        if (!within(plugin.services_.now_ms(), plugin.environment_second_, plugin.environments_, 4)) return result(L, "more than 4 changes in a second");
+        return result(L, game_of(plugin).set_atmosphere(values));
+    }
     // ---- travel ------------------------------------------------------------------------------------
     static int locations(lua_State* L) {
         auto& plugin = plugin_of(L);
@@ -3523,7 +3545,7 @@ void WorldApi::install(Plugin& plugin, lua_State* L) {
                                   {"ready", entities_ready}, {"blueprints", entities_blueprints},
                                   {"bounds", entities_bounds}});
     add_functions(L, "world", {{"set_time", set_time}, {"time", time_now}, {"set_control", set_control}, {"set_park", set_park}, {"controls", controls},
-                               {"controls_text", controls_text}, {"pick", world_pick}, {"probe", world_probe}});
+                               {"controls_text", controls_text}, {"set_atmosphere", set_atmosphere}, {"pick", world_pick}, {"probe", world_probe}});
     add_functions(L, "travel", {{"locations", locations}, {"levels", levels}, {"go", go}, {"load", load}});
     add_functions(L, "ai", {{"spawn", ai_spawn}, {"clear", ai_clear}, {"count", ai_count}});
     add_functions(L, "session", {{"skaters", skaters}, {"tag", tag}, {"nametags", nametags}, {"joint", session_joint}, {"touch", session_touch},
