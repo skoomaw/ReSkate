@@ -183,6 +183,10 @@ struct Shared {
     ComPtr<ID3D12PipelineState> measure_pipeline;
     const std::uint8_t* measure_cpu{};
     std::array<bool, allocator_count> measure_waiting{};
+    // Whether that frame was drawn with its own depth: one drawn with an older copy (the camera moved
+    // since) measured the near distance too short, and it was held (0.056 m for 0.060, 2026-11-12).
+    std::array<bool, allocator_count> measure_fresh{};
+    bool relearning{}; // a new camera: the next middle measured is taken, up or down
     // The cameras of this and the last two frames, newest first, and how many are known.
     std::array<std::array<float, camera_floats>, camera_candidates> cameras{};
     std::size_t cameras_known{};
@@ -844,14 +848,19 @@ void take_measurements(Shared& s, const std::uint8_t* rows) {
     // A frame far from the distance held is let be, unless twenty in a row say so (a new camera): one
     // that measured the wrong thing moved the whole cover for a moment, and the snow at the bottom of the
     // screen thinned out with it (2026-11-11).
-    if (s.held_near > 0 && std::abs(measured - s.held_near) > s.held_near * 0.2f) {
+    if (!s.relearning && s.held_near > 0 && std::abs(measured - s.held_near) > s.held_near * 0.2f) {
         if (++s.near_disagreed < 20) return;
+        // A new camera: its own distance, from the start. The one held stays until the new one is known
+        // (and is then eased into): set to nothing meanwhile, the snow went to each frame's own guess and
+        // jumped (2026-11-12).
         s.nears.clear();
-        s.held_near = 0; // a new camera: its own distance, from the start
+        s.relearning = true;
     }
     s.near_disagreed = 0;
     s.nears.push_back(measured);
-    while (s.nears.size() > 45) s.nears.pop_front();
+    // About three seconds of them: a short spell of wrong ones (a change of time of day, a new depth
+    // being found) no longer moves the middle.
+    while (s.nears.size() > 400) s.nears.pop_front();
     std::vector<float> sorted(s.nears.begin(), s.nears.end());
     const auto half = sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2);
     std::nth_element(sorted.begin(), half, sorted.end());
@@ -861,7 +870,8 @@ void take_measurements(Shared& s, const std::uint8_t* rows) {
     // game's own about 0.060), and in time it stops changing. The world is rebuilt from it: one that
     // went up and down with the measurements made the snow's pattern jump on the ground, plainest
     // while the snow was half melted (2026-11-12).
-    if (sorted.size() >= 5 && (s.held_near <= 0 || *half < s.held_near * 0.997f)) {
+    if (sorted.size() >= (s.relearning ? 30u : 5u) && (s.held_near <= 0 || s.relearning || *half < s.held_near * 0.997f)) {
+        s.relearning = false;
         if (s.held_near > 0)
             logging::printf(logging::Level::debug, logging::Channel::graphics, "World cover: near distance %.5f, was %.5f.", *half, s.held_near);
         s.held_near = *half;
@@ -925,7 +935,7 @@ bool record_cover(Shared& s) {
         return false;
     }
     // What this allocator's last list measured: the GPU is done with it.
-    if (s.measure_waiting[at] && s.measure_cpu) take_measurements(s, s.measure_cpu + at * measure_slice);
+    if (s.measure_waiting[at] && s.measure_fresh[at] && s.measure_cpu) take_measurements(s, s.measure_cpu + at * measure_slice);
     s.measure_waiting[at] = false;
     s.why = "recording failed";
     if (FAILED(s.allocators[at]->Reset()) || FAILED(s.list->Reset(s.allocators[at].Get(), nullptr))) return false;
@@ -1092,6 +1102,7 @@ bool record_cover(Shared& s) {
         from.SubresourceIndex = 0;
         list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
         s.measure_waiting[at] = true;
+        s.measure_fresh[at] = s.depth_copied_frame == s.frame;
     }
 
     transition(list, s.colour, D3D12_RESOURCE_STATE_RENDER_TARGET, before);
@@ -1332,6 +1343,8 @@ void release() noexcept {
         s.measure_cpu = nullptr;
         s.measure_pipeline.Reset();
         s.measure_waiting = {};
+        s.measure_fresh = {};
+        s.relearning = false;
         s.cameras_known = 0;
         s.nears.clear();
         s.held_near = 0;
