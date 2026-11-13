@@ -946,10 +946,10 @@ bool record_cover(Shared& s) {
         const float wanted = a.settings.camera_delay;
         if (wanted >= 0 && s.cameras_known > 1) {
             const float most = static_cast<float>(s.cameras_known - 1);
-            const float at = std::min(wanted, most);
-            const auto newer = static_cast<std::size_t>(std::floor(at));
+            const float frames_back = std::min(wanted, most);
+            const auto newer = static_cast<std::size_t>(std::floor(frames_back));
             const auto older = std::min(newer + 1, s.cameras_known - 1);
-            const float t = at - static_cast<float>(newer);
+            const float t = frames_back - static_cast<float>(newer);
             for (std::size_t k = 0; k < camera_floats; ++k) blended[k] = s.cameras[newer][k] + (s.cameras[older][k] - s.cameras[newer][k]) * t;
             for (std::size_t axis = 0; axis < 3; ++axis) {
                 float* const v = blended.data() + axis * 3;
