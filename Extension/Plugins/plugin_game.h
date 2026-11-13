@@ -334,7 +334,6 @@ public:
         float amount{1}, facing{0.55f}, softness{0.15f}, brightness{1.6f}, breakup{0.35f}, sparkle{0}, snowfall{0}, fall_speed{1};
         float left{1}; // how much of it is left (melting), 0..1, the same everywhere
         bool snowfall_stopping{}; // the snow stops falling: no new flakes, the last ones fall out
-        unsigned camera_delay{}; // 0..2: the camera of how many frames before (world_cover.h)
     };
     virtual std::string world_cover(std::string_view /*plugin*/, std::optional<WorldCover>) { return unavailable; }
     // The time of day forced on the map now (morning, noon, afternoon, evening, night, weatherday,

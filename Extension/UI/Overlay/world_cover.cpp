@@ -45,7 +45,6 @@ constexpr UINT views_each = 2;
 // two before as well and drawing with whichever agreed best chose a different one every few seconds
 // (their agreement differed by noise), and every change moved the whole cover by a frame (2026-11-11).
 constexpr std::size_t camera_candidates = 1;
-constexpr std::size_t camera_history = 3; // the cameras kept: this frame's and the two before (Settings::camera_delay)
 constexpr std::size_t camera_floats = 12; // right, up, back, eye
 // Trails through the cover (add_trail): at most this many points kept (world_cover.hlsl's MOST_TRAIL).
 constexpr std::size_t most_trail = 256;
@@ -192,7 +191,7 @@ struct Shared {
     std::array<bool, allocator_count> measure_fresh{};
     bool relearning{}; // a new camera: the next middle measured is taken, up or down
     // The cameras of this and the last two frames, newest first, and how many are known.
-    std::array<std::array<float, camera_floats>, camera_history> cameras{};
+    std::array<std::array<float, camera_floats>, camera_candidates> cameras{};
     std::size_t cameras_known{};
     // The near distance each recent frame measured, and the steady middle of them (0: none yet).
     std::deque<float> nears;
@@ -925,10 +924,11 @@ bool record_cover(Shared& s) {
     // This frame's camera, newest first (the measurements try the first camera_candidates of them).
     {
         const auto& m = projector->m;
-        for (std::size_t c = camera_history - 1; c > 0; --c) s.cameras[c] = s.cameras[c - 1];
+        for (std::size_t c = camera_candidates - 1; c > 0; --c) s.cameras[c] = s.cameras[c - 1];
         s.cameras[0] = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10], m[12], m[13], m[14]};
-        s.cameras_known = std::min(s.cameras_known + 1, camera_history);
+        s.cameras_known = std::min(s.cameras_known + 1, camera_candidates);
     }
+    const auto& camera = s.cameras[0];
 
     Settings settings;
     std::vector<Clear> clear;
@@ -958,14 +958,11 @@ bool record_cover(Shared& s) {
         head[0] = static_cast<float>(count), head[1] = box[0], head[2] = box[1], head[3] = box[2];
         head[4] = box[3], head[5] = box[4], head[6] = box[5], head[7] = 0;
     }
-    // The camera the world is found with: this frame's as read now, or one of the two before.
-    const std::size_t delay = std::min<std::size_t>(settings.camera_delay, s.cameras_known - 1);
-    const auto& camera = s.cameras[delay];
     // The candidate cameras for ps_measure, into this command allocator's part of the upload buffer.
     {
         auto* const out = reinterpret_cast<float*>(s.camera_cpu + at * camera_slice);
         for (std::size_t c = 0; c < camera_candidates; ++c) {
-            const auto& from = s.cameras[std::min(c + delay, s.cameras_known - 1)];
+            const auto& from = s.cameras[std::min(c, s.cameras_known - 1)];
             float* const to = out + c * 4 * 4;
             for (std::size_t v = 0; v < 4; ++v) {
                 to[v * 4] = from[v * 3], to[v * 4 + 1] = from[v * 3 + 1], to[v * 4 + 2] = from[v * 3 + 2], to[v * 4 + 3] = 0;
