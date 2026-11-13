@@ -53,6 +53,10 @@ constexpr std::size_t camera_candidates = 1;
 // a little with the frame rate, so none is perfect.
 constexpr float camera_delay = 1.15f;
 constexpr std::size_t camera_history = 3; // the cameras kept, newest first: enough for camera_delay
+// The places kept clear are taken from this many frames back (blended). They come from the game a little
+// later than the camera: with none, a turning deck's place was ahead of the deck drawn, and with
+// camera_delay behind it, the ground showing the dusting at its front, then at its back (2026-11-13).
+constexpr float place_delay = 0.5f;
 constexpr std::size_t camera_floats = 12; // right, up, back, eye
 // Trails through the cover (add_trail): at most this many points kept (world_cover.hlsl's MOST_TRAIL).
 constexpr std::size_t most_trail = 256;
@@ -984,18 +988,20 @@ bool record_cover(Shared& s) {
         head[0] = static_cast<float>(count), head[1] = box[0], head[2] = box[1], head[3] = box[2];
         head[4] = box[3], head[5] = box[4], head[6] = box[5], head[7] = 0;
     }
-    // The places as the picture has them: camera_delay back, between the two kept either side, blended
-    // where they are the same places. With this tick's, a deck turning was ahead of the deck drawn, and the
-    // ground at its front corner took the deck's light dusting (2026-11-13).
+    // The places as the picture has them: place_delay back, between the two kept either side, blended
+    // where they are the same places.
     for (std::size_t c = camera_history - 1; c > 0; --c) s.clears[c] = std::move(s.clears[c - 1]);
     s.clears[0] = clear;
     {
-        const auto& near_one = s.clears[delay];
-        const auto& far_one = s.clears[older];
+        const float place_back = std::min(place_delay, static_cast<float>(s.cameras_known - 1));
+        const auto place_at = static_cast<std::size_t>(place_back);
+        const float place_blend = place_back - static_cast<float>(place_at);
+        const auto& near_one = s.clears[place_at];
+        const auto& far_one = s.clears[std::min(place_at + 1, s.cameras_known - 1)];
         clear = near_one;
         if (far_one.size() == near_one.size()) {
             const auto mix = [&](std::array<float, 3>& to, const std::array<float, 3>& from) {
-                for (std::size_t k = 0; k < 3; ++k) to[k] += (from[k] - to[k]) * blend;
+                for (std::size_t k = 0; k < 3; ++k) to[k] += (from[k] - to[k]) * place_blend;
             };
             const auto unit = [](std::array<float, 3>& v) {
                 const float length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
