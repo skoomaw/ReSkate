@@ -24,6 +24,7 @@
 
 // world_cover.h says what this does and how it finds its moment in the game's frame.
 namespace dingosdk::world_cover {
+namespace camera_search { void take(int kind, unsigned index, std::uint64_t address) noexcept; } // research, below
 namespace {
 using Microsoft::WRL::ComPtr;
 
@@ -445,6 +446,7 @@ void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* queue, UINT count, ID3
             s.colour_format = s.chosen_format;
             s.why = s.unsafe ? "a split or aliasing barrier, or another queue" : s.depth_elsewhere ? "the depth moved on another queue"
                   : composite->final_format != s.chosen_format ? "the final picture in another format" : nullptr;
+            camera_search::take(-1, 0, 0); // research: where in the frame's binds the snow is recorded
             const bool drew = !s.why && record_cover(s);
             if (drew) {
                 s.drawn = true;
@@ -1315,7 +1317,7 @@ void take(int kind, unsigned index, std::uint64_t address) noexcept {
     if (!taking.load(std::memory_order_relaxed)) return;
     try {
         std::lock_guard lock(bound_mutex);
-        if (bound.size() < 30000) bound.push_back({kind, index, address});
+        if (bound.size() < 60000) bound.push_back({kind, index, address});
     } catch (...) {}
 }
 using Camera = std::array<float, camera_floats>; // right, up, back, eye
@@ -1337,32 +1339,67 @@ float matrix_error(const float* f, bool columns, const Camera& c) {
     for (std::size_t a = 0; a < 3; ++a) worst = std::max(worst, axis_error(f + a * apart, stride, c.data() + a * 3));
     return worst;
 }
+// Whether a matrix's rotation is one: every float finite, each axis about a unit long (data that is not
+// numbers matched every camera before, 2026-11-13).
+bool rotation_like(const float* f, bool columns) {
+    const std::size_t stride = columns ? 4 : 1, apart = columns ? 1 : 4;
+    for (std::size_t a = 0; a < 3; ++a) {
+        float length = 0;
+        for (std::size_t c = 0; c < 3; ++c) {
+            const float v = f[a * apart + c * stride];
+            if (!std::isfinite(v)) return false;
+            length += v * v;
+        }
+        if (std::abs(length - 1.0f) > 0.02f) return false;
+    }
+    return true;
+}
 void search(const std::vector<Bound>& seen, const std::vector<std::pair<std::string, Camera>>& cameras) {
-    std::set<std::tuple<int, unsigned, std::uint64_t>> unique;
-    for (const auto& b : seen) unique.insert({b.kind, b.index, b.address});
+    // Each address bound, in the order of the frame: how often, and the first time; and where the snow was
+    // recorded among the binds (kind -1).
+    struct Use {
+        std::size_t count{}, first{};
+    };
+    std::map<std::tuple<int, unsigned, std::uint64_t>, Use> uses;
+    std::size_t snow_at = ~std::size_t{0}, binds = 0;
+    for (const auto& b : seen) {
+        if (b.kind < 0) {
+            if (snow_at == ~std::size_t{0}) snow_at = binds;
+            continue;
+        }
+        auto& use = uses[{b.kind, b.index, b.address}];
+        if (!use.count) use.first = binds;
+        ++use.count;
+        ++binds;
+    }
     struct Match {
         float error{};
-        std::string line;
+        std::size_t first{};
+        std::string key, line;
     };
     std::vector<Match> matches;
     std::size_t readable = 0;
     std::array<float, 256> f{};
-    for (const auto& [kind, index, address] : unique) {
-        const auto got = overlay::read_gpu_buffer(address, f.data(), sizeof(f)) / sizeof(float);
+    for (const auto& [where, use] : uses) {
+        const auto& [kind, index, address] = where;
+        std::uint64_t start{}, length{};
+        const auto got = overlay::read_gpu_buffer(address, f.data(), sizeof(f), &start, &length) / sizeof(float);
         if (!got) continue;
         ++readable;
         for (std::size_t i = 0; i + 12 <= got; ++i) {
             for (const bool columns : {false, true}) {
+                if (!rotation_like(f.data() + i, columns)) continue;
                 std::vector<float> errors;
                 for (const auto& [name, camera] : cameras) errors.push_back(matrix_error(f.data() + i, columns, camera));
                 const auto best = static_cast<std::size_t>(std::min_element(errors.begin(), errors.end()) - errors.begin());
                 if (errors[best] > 0.02f) continue;
-                std::string line = std::format("{} {} at +{} bytes ({}): {} best ({:.4f}); the others", kind == 0 ? "compute root view" : kind == 1 ? "graphics root view" : "descriptor",
-                                               index, i * 4, columns ? "columns" : "rows", cameras[best].first, errors[best]);
+                const char* kind_name = kind == 0 ? "compute root view" : kind == 1 ? "graphics root view" : "descriptor";
+                std::string line = std::format("{} {} at +{} bytes ({}), in a buffer of {} bytes at +{}: bound {} time(s), first at bind {} of {}; "
+                                               "{} best ({:.4f}); the others",
+                                               kind_name, index, i * 4, columns ? "columns" : "rows", length, address - start, use.count, use.first,
+                                               binds, cameras[best].first, errors[best]);
                 for (std::size_t k = 0; k < errors.size(); ++k)
                     if (k != best) line += std::format(" {} {:.4f}", cameras[k].first, errors[k]);
-                // Where the camera is, as such a matrix keeps it: rows, the fourth row; columns (a view
-                // matrix), each axis against the eye, the other way.
                 const auto& c = cameras[best].second;
                 if (i + 15 <= got && !columns)
                     line += std::format("; its fourth row {:.2f} {:.2f} {:.2f}, the eye {:.2f} {:.2f} {:.2f}", f[i + 12], f[i + 13], f[i + 14], c[9], c[10], c[11]);
@@ -1371,15 +1408,21 @@ void search(const std::vector<Bound>& seen, const std::vector<std::pair<std::str
                                 tz = -(c[6] * c[9] + c[7] * c[10] + c[8] * c[11]);
                     line += std::format("; its fourth column {:.2f} {:.2f} {:.2f}, the eye undone {:.2f} {:.2f} {:.2f}", f[i + 3], f[i + 7], f[i + 11], tx, ty, tz);
                 }
-                matches.push_back({errors[best], std::move(line)});
+                // One line for each kind of place (the same view, offset, layout and buffer size), its earliest bind.
+                matches.push_back({errors[best], use.first, std::format("{} {} {} {} {}", kind, index, i, columns, length), std::move(line)});
             }
         }
     }
-    std::sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) { return a.error < b.error; });
+    std::sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) { return a.first < b.first; });
+    std::set<std::string> said;
+    std::vector<const Match*> shown;
+    for (const auto& m : matches)
+        if (said.insert(m.key).second) shown.push_back(&m);
     logging::printf(logging::Level::info, logging::Channel::graphics,
-                    "Camera search: %zu constant buffers bound in a frame, %zu readable, %zu matrices like the camera.", unique.size(), readable, matches.size());
-    for (std::size_t m = 0; m < matches.size() && m < 16; ++m)
-        logging::write(logging::Level::info, logging::Channel::graphics, "Camera search:   " + matches[m].line);
+                    "Camera search: %zu binds of %zu constant buffers in a frame (the snow recorded at bind %zu), %zu readable, %zu camera matrices in %zu kinds of place.",
+                    binds, uses.size(), snow_at, readable, matches.size(), shown.size());
+    for (std::size_t m = 0; m < shown.size() && m < 24; ++m)
+        logging::write(logging::Level::info, logging::Channel::graphics, "Camera search:   " + shown[m]->line);
 }
 // Each frame (present): one frame in every three seconds is taken.
 void step(const std::array<Camera, camera_history>& history, std::size_t known) {

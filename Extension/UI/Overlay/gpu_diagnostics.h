@@ -46,7 +46,9 @@ using ConstantsWatcher = void (*)(int kind, unsigned index, std::uint64_t addres
 void watch_constants(ConstantsWatcher watcher) noexcept;
 // Research: copies up to `bytes` bytes from a GPU address in a CPU-visible buffer the GPU memory watch
 // knows (an upload buffer, mapped for the read) into `out`. How many were copied (0: not one it can read).
-std::size_t read_gpu_buffer(std::uint64_t address, void* out, std::size_t bytes) noexcept;
+// `start` and `length`, when given: where the buffer holding the address starts on the GPU, and its size.
+std::size_t read_gpu_buffer(std::uint64_t address, void* out, std::size_t bytes, std::uint64_t* start = nullptr,
+                            std::uint64_t* length = nullptr) noexcept;
 // The graphics card the game renders on and its driver's version: said in the log once, and kept
 // for crash reports' tags (crash_report::set_gpu). Always on.
 void record_gpu_identity(ID3D12Device* device) noexcept;

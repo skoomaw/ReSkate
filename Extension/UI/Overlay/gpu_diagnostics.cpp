@@ -1010,7 +1010,8 @@ void watch_gpu_memory() noexcept {
 
 void watch_constants(ConstantsWatcher watcher) noexcept { constants_watcher.store(watcher); }
 
-std::size_t read_gpu_buffer(std::uint64_t address, void* out, std::size_t bytes) noexcept {
+std::size_t read_gpu_buffer(std::uint64_t address, void* out, std::size_t bytes, std::uint64_t* buffer_start,
+                            std::uint64_t* buffer_length) noexcept {
     try {
         auto& m = gpu_memory();
         std::lock_guard lock(m.mutex); // a resource is not freed while this is held (its release is noted under it)
@@ -1046,6 +1047,8 @@ std::size_t read_gpu_buffer(std::uint64_t address, void* out, std::size_t bytes)
         if (FAILED(resource->Map(0, nullptr, &cpu)) || !cpu) return 0; // (only a CPU-visible heap maps)
         const auto offset = address - resource_start;
         const auto n = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, resource_bytes - offset));
+        if (buffer_start) *buffer_start = resource_start;
+        if (buffer_length) *buffer_length = resource_bytes;
         std::memcpy(out, static_cast<const char*>(cpu) + offset, n);
         const D3D12_RANGE written{0, 0};
         resource->Unmap(0, &written);
