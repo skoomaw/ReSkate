@@ -943,10 +943,10 @@ bool record_cover(Shared& s) {
         // TEST: a plugin's own delay, between two frames' cameras blended (axes made unit again).
         auto& a = asked();
         std::lock_guard lock(a.mutex);
-        const float wanted = a.settings.camera_delay;
-        if (wanted >= 0 && s.cameras_known > 1) {
+        const float asked_delay = a.settings.camera_delay;
+        if (asked_delay >= 0 && s.cameras_known > 1) {
             const float most = static_cast<float>(s.cameras_known - 1);
-            const float frames_back = std::min(wanted, most);
+            const float frames_back = std::min(asked_delay, most);
             const auto newer = static_cast<std::size_t>(std::floor(frames_back));
             const auto older = std::min(newer + 1, s.cameras_known - 1);
             const float t = frames_back - static_cast<float>(newer);
