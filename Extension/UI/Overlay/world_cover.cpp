@@ -31,6 +31,7 @@ using Microsoft::WRL::ComPtr;
 // Slots of the D3D12 interfaces' tables (d3d12.h's declaration order).
 constexpr std::size_t device_create_rtv = 20, device_create_dsv = 21, device_copy_descriptors = 23, device_copy_simple = 24;
 constexpr std::size_t list_set_targets = 46, list_begin_render_pass = 68, queue_execute = 10;
+constexpr std::size_t list_compute_root_cbv = 37; // SetComputeRootConstantBufferView
 // world_cover.hlsl's cbuffer: seven float4s of camera and look, then the places kept clear (one float4
 // with their count and heights, three with their feet and radii), then last frame's camera (four). A
 // root signature holds 64 values at most, and the descriptor table takes one.
@@ -107,6 +108,17 @@ using RenderPassFn = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList4*, UINT,
                                               const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC*, D3D12_RENDER_PASS_FLAGS);
 std::atomic<RenderPassFn> original_render_pass{};
 std::atomic<ExecuteFn> original_execute{};
+// The game's camera, as it drew the frame: the compute constant buffers it binds at root parameter 0, the last
+// bound_kept of them in turn (a count, and the slot each went into). Tried in the game (2026-11-13): these
+// begin with the camera the frame is drawn with, 16 bytes in, its right, up and back as rows four floats
+// apart and where it is in the fourth row, and are bound before the cover is recorded. The camera the game
+// drew with was 0 to 2 frames older than the newest read from the game, sometimes between two of them, so a
+// fixed delay was right only on average and world-fixed things (trails) still moved a little.
+using RootViewFn = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, UINT, D3D12_GPU_VIRTUAL_ADDRESS);
+std::atomic<RootViewFn> original_compute_cbv{};
+constexpr std::size_t bound_kept = 64;
+std::array<std::atomic<std::uint64_t>, bound_kept> bound_addresses{};
+std::atomic<std::uint64_t> bound_count{};
 
 // What a plugin asked for (client thread).
 struct Asked {
@@ -234,6 +246,9 @@ struct Shared {
     // The cameras of this and the last two frames, newest first, and how many are known.
     std::array<std::array<float, camera_floats>, camera_history> cameras{};
     std::size_t cameras_known{};
+    // The game's own camera (game_camera): the binds already looked through, and how many frames found it.
+    std::uint64_t bound_seen{};
+    unsigned game_camera_frames{}, camera_frames{}, camera_reports{};
     // The places kept clear as each of those frames was drawn, newest first: a place on something that moves
     // (a deck) is drawn where the picture has it, camera_delay back, like the world.
     std::array<std::vector<Clear>, camera_history> clears{};
@@ -907,6 +922,51 @@ void take_measurements(Shared& s, const std::uint8_t* rows) {
                         best_count, measure_columns);
 }
 
+void STDMETHODCALLTYPE hooked_compute_cbv(ID3D12GraphicsCommandList* list, UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) {
+    original_compute_cbv.load(std::memory_order_relaxed)(list, index, address);
+    if (index != 0 || !active.load(std::memory_order_relaxed)) return;
+    const auto n = bound_count.fetch_add(1, std::memory_order_relaxed);
+    bound_addresses[n % bound_kept].store(address, std::memory_order_relaxed);
+}
+
+// The camera the game drew this frame with, from the compute constant buffers bound since the last frame,
+// newest first: the first that holds a camera (unit axes, as rows from 16 bytes in) close to `camera` (the
+// one read from the game, delayed), within about 14 degrees and 2 m. Each axis is taken the way round
+// `camera` has it. Its buffer is read through the GPU memory watch (gpu_diagnostics.h); false when none.
+bool game_camera(Shared& s, std::array<float, camera_floats>& camera) {
+    const auto end = bound_count.load();
+    const auto begin = std::max(s.bound_seen, end > bound_kept ? end - bound_kept : std::uint64_t{0});
+    s.bound_seen = end;
+    std::array<float, 20> f{};
+    for (auto n = end; n > begin; --n) {
+        const auto address = bound_addresses[(n - 1) % bound_kept].load(std::memory_order_relaxed);
+        if (!address || overlay::read_gpu_buffer(address, f.data(), sizeof(f)) < sizeof(f)) continue;
+        const float* const rows = f.data() + 4;
+        std::array<float, camera_floats> found{};
+        bool ok = true;
+        for (std::size_t a = 0; a < 3 && ok; ++a) {
+            float length = 0, along = 0;
+            for (std::size_t c = 0; c < 3; ++c) {
+                const float v = rows[a * 4 + c];
+                ok = ok && std::isfinite(v);
+                length += v * v, along += v * camera[a * 3 + c];
+            }
+            const float sign = along < 0 ? -1.0f : 1.0f;
+            ok = ok && std::abs(length - 1.0f) < 0.02f && along * sign > 0.97f;
+            for (std::size_t c = 0; c < 3; ++c) found[a * 3 + c] = rows[a * 4 + c] * sign;
+        }
+        for (std::size_t c = 0; c < 3 && ok; ++c) {
+            const float v = rows[12 + c];
+            ok = std::isfinite(v) && std::abs(v - camera[9 + c]) < 2.0f;
+            found[9 + c] = v;
+        }
+        if (!ok) continue;
+        camera = found;
+        return true;
+    }
+    return false;
+}
+
 bool record_cover(Shared& s) {
     s.why = "nothing to draw into";
     if (s.failed || !s.colour || !s.main_depth) return false;
@@ -985,6 +1045,18 @@ bool record_cover(Shared& s) {
         float* const v = camera.data() + axis * 3;
         const float length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
         if (length > 1e-6f) v[0] /= length, v[1] /= length, v[2] /= length;
+    }
+    // The camera the game drew this frame with, where it can be read; else the delayed one above.
+    const bool own_camera = game_camera(s, camera);
+    s.game_camera_frames += own_camera ? 1 : 0;
+    if (++s.camera_frames >= 600) {
+        if (s.camera_reports < 6) {
+            ++s.camera_reports;
+            logging::printf(logging::Level::info, logging::Channel::graphics,
+                            "World cover: the game's own camera was read in %u of the last 600 frames (else the one %.2f frames back).",
+                            s.game_camera_frames, camera_delay);
+        }
+        s.camera_frames = s.game_camera_frames = 0;
     }
 
     Settings settings;
@@ -1365,6 +1437,9 @@ void install(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12GraphicsComm
                     hook(device_table, device_copy_simple, reinterpret_cast<void*>(&hooked_copy_simple), original_copy_simple, "CopyDescriptorsSimple") &&
                     hook(list_table, list_set_targets, reinterpret_cast<void*>(&hooked_targets), original_targets, "OMSetRenderTargets") &&
                     hook(queue_table, queue_execute, reinterpret_cast<void*>(&hooked_execute), original_execute, "ExecuteCommandLists");
+    // The game's own camera (game_camera): without it, the delayed camera is used, as before.
+    if (ok) (void)hook(list_table, list_compute_root_cbv, reinterpret_cast<void*>(&hooked_compute_cbv), original_compute_cbv,
+                       "SetComputeRootConstantBufferView");
     // Render passes (ID3D12GraphicsCommandList4) bind targets too; only when the runtime's lists have them.
     ComPtr<ID3D12GraphicsCommandList4> list4;
     if (ok && SUCCEEDED(list->QueryInterface(IID_PPV_ARGS(&list4))) && list4) {

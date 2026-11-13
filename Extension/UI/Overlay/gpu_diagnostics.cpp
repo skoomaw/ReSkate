@@ -309,7 +309,11 @@ void remove_range(const Allocation& a) {
     m.generation.fetch_add(1, std::memory_order_relaxed);
 }
 
+// Without RESKATE_GPU_DIAGNOSTICS the memory watch is light (world_cover reads the game's camera from its
+// upload buffers): each heap and resource with its GPU addresses, but not the code that made or freed it.
+std::atomic<bool> light_memory{};
 Frames capture_frames() noexcept {
+    if (light_memory.load(std::memory_order_relaxed)) return {};
     Frames frames;
     frames.depth = CaptureStackBackTrace(2, static_cast<DWORD>(frames.at.size()), frames.at.data(), nullptr);
     return frames;
@@ -384,6 +388,8 @@ void note_resource(void** out, void* heap, std::uint64_t offset) noexcept {
         if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
             made.bytes = desc.Width;
             made.gpu = resource->GetGPUVirtualAddress();
+        } else if (light_memory.load(std::memory_order_relaxed)) {
+            // (Light: a texture's size is not needed.)
         } else if (auto* const device = gpu_memory().device) {
             // (UINT64_MAX: the runtime could not size it.)
             if (const auto size = device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes; size != UINT64_MAX) made.bytes = size;
@@ -592,10 +598,12 @@ void watch_device_memory(IUnknown* made) noexcept {
         on &= hook_slot(device10.Get(), 77, reinterpret_cast<void*>(&hooked_placed2), original_placed2);
         on &= hook_slot(device10.Get(), 78, reinterpret_cast<void*>(&hooked_reserved2), original_reserved2);
     }
-    on &= watch_device_views(device.Get());
+    const bool light = light_memory.load();
+    if (!light) on &= watch_device_views(device.Get());
     dingosdk::logging::write(on ? dingosdk::logging::Level::info : dingosdk::logging::Level::warning, dingosdk::logging::Channel::graphics,
-        on ? "GPU diagnostics: the code that makes and frees each GPU heap and resource is kept, for a page fault's report."
-           : "GPU diagnostics: some of the GPU memory watch could not start.");
+        !on ? "GPU diagnostics: some of the GPU memory watch could not start."
+        : light ? "GPU memory watch (light): each GPU heap and buffer's addresses are kept, for the snow to read the game's camera."
+                : "GPU diagnostics: the code that makes and frees each GPU heap and resource is kept, for a page fault's report.");
 }
 
 using CreateDevice = HRESULT (WINAPI*)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
@@ -990,10 +998,12 @@ void watch_addresses(ID3D12GraphicsCommandList* list) noexcept {
 void watch_gpu_memory() noexcept {
     static std::atomic<bool> started{};
     const auto error = GetLastError();
-    if (!graphics_option_enabled(L"RESKATE_GPU_DIAGNOSTICS") || started.exchange(true)) {
+    if (started.exchange(true)) {
         SetLastError(error);
         return;
     }
+    // Without the diagnostics, light: only what the snow needs to read the game's camera.
+    light_memory.store(!graphics_option_enabled(L"RESKATE_GPU_DIAGNOSTICS"));
     // (d3d12.dll is ReSkate's own import, so it is loaded; the game finds D3D12CreateDevice there.)
     auto* const create = reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"d3d12.dll"), "D3D12CreateDevice"));
     void* trampoline{};
