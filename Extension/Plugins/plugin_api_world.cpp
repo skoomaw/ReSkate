@@ -45,6 +45,34 @@ struct WorldApi {
         return 1;
     }
     // ---- skater.control ------------------------------------------------------------------------
+    // surface_sound(word or nil[, fields]): the local skater's sounds as on the surface that physics
+    // material word names, wherever the skater is, in the sound's material fields listed in fields
+    // (1 to 18; omitted: every one); nil gives each surface its own.
+    static int surface_sound(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "skater.control", "reskate.skater.surface_sound");
+        std::optional<std::uint32_t> word;
+        if (!lua_isnoneornil(L, 1)) {
+            const double value = luaL_checknumber(L, 1);
+            if (!(value >= 1 && value <= 4294967295.0) || value != std::floor(value)) luaL_argerror(L, 1, "not a physics material word");
+            word = static_cast<std::uint32_t>(value);
+        }
+        std::uint32_t fields = ~0U;
+        if (!lua_isnoneornil(L, 2)) {
+            luaL_checktype(L, 2, LUA_TTABLE);
+            const int count = lua_objlen(L, 2);
+            if (count < 1 || count > 18) luaL_argerror(L, 2, "1 to 18 fields");
+            fields = 0;
+            for (int i = 1; i <= count; ++i) {
+                lua_rawgeti(L, 2, i);
+                const double field = luaL_checknumber(L, -1);
+                if (!(field >= 1 && field <= 18) || field != std::floor(field)) luaL_argerror(L, 2, "fields are 1 to 18");
+                fields |= 1U << (static_cast<int>(field) - 1);
+                lua_pop(L, 1);
+            }
+        }
+        return result(L, game_of(plugin).skater_surface_sound(plugin.id(), word, fields));
+    }
     static int control(lua_State* L, const char* action) {
         auto& plugin = plugin_of(L);
         need(L, plugin, "skater.control", "reskate.skater control");
@@ -291,6 +319,35 @@ struct WorldApi {
         case Teleport::forbidden: return result(L, "the host has turned teleporting off");
         default: return result(L, "teleporting is unavailable now");
         }
+    }
+    // hold_preset(name, {[id] = number, ...}): the plugin's preset in the trainer, held: every other preset
+    // and change is off while it holds, and the player cannot change them; the player's own come back, as
+    // they were, on hold_preset(nil) or when the plugin stops. Ids as the trainer's presets name them
+    // (tuning values and its settings). Not saved, and not put among the player's presets.
+    static int hold_preset(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "trainer", "reskate.trainer.hold_preset");
+        if (lua_isnoneornil(L, 1)) return result(L, game_of(plugin).trainer_preset(plugin.id(), {}, std::nullopt));
+        std::size_t length{};
+        const char* name = luaL_checklstring(L, 1, &length);
+        if (length == 0 || length > 48) luaL_argerror(L, 1, "a preset's name is 1 to 48 characters");
+        luaL_checktype(L, 2, LUA_TTABLE);
+        std::map<std::string, double, std::less<>> values;
+        lua_pushnil(L);
+        while (lua_next(L, 2) != 0) {
+            if (lua_type(L, -2) != LUA_TSTRING) luaL_error(L, "a preset's values are {[id] = number}");
+            std::size_t key_length{};
+            const char* key = lua_tolstring(L, -2, &key_length);
+            const double value = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : NAN;
+            if (key_length == 0 || key_length > 200 || !std::isfinite(value)) luaL_error(L, "a preset's values are {[id] = number}, each finite");
+            std::string id(key, key_length);
+            for (auto& c : id) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            values[std::move(id)] = value;
+            if (values.size() > 512) luaL_error(L, "a preset holds at most 512 values");
+            lua_pop(L, 1);
+        }
+        if (values.empty()) luaL_argerror(L, 2, "a preset holds at least one value");
+        return result(L, game_of(plugin).trainer_preset(plugin.id(), std::string_view(name, length), std::move(values)));
     }
     // ---- hud ---------------------------------------------------------------------------------------
     static int hide_hud(lua_State* L) {
@@ -765,6 +822,16 @@ struct WorldApi {
         return result(L, game_of(plugin).set_environment(kind, key, value));
     }
     static int set_time(lua_State* L) { return environment(L, "tod", checked_text(L, 1, 20, "a time of day"), {}); }
+    // time(): the time of day forced on the map now ("morning" ... "weathernight"), "default" for the
+    // level's own, or nil with no map.
+    static int time_now(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "world.environment", "reskate.world.time");
+        const auto now = game_of(plugin).time_of_day_now();
+        if (now.empty()) lua_pushnil(L);
+        else lua_pushlstring(L, now.data(), now.size());
+        return 1;
+    }
     static int set_control(lua_State* L) {
         const auto key = checked_text(L, 1, 30, "a world control");
         const double value = luaL_checknumber(L, 2);
@@ -772,6 +839,55 @@ struct WorldApi {
         return environment(L, "control", key, std::to_string(value));
     }
     static int set_park(lua_State* L) { return environment(L, "park", checked_text(L, 1, 30, "a lot"), checked_text(L, 2, 40, "a layout")); }
+    // controls(): {fog = n, fog_distance = n, sky_brightness = n, clouds = n, wind_strength = n,
+    // wind_direction = n, traffic = n, pedestrians = n} as the player's profile holds them (-1: the
+    // level's own), or nil without a profile; what set_control changes, so it can be put back.
+    static int controls(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "world.environment", "reskate.world.controls");
+        const auto now = game_of(plugin).world_controls();
+        if (now.empty()) {
+            lua_pushnil(L);
+            return 1;
+        }
+        lua_createtable(L, 0, static_cast<int>(now.size()));
+        for (const auto& [key, value] : now) {
+            lua_pushnumber(L, value);
+            lua_setfield(L, -2, key.c_str());
+        }
+        return 1;
+    }
+    // controls_text(): the world controls the player has set in ReSkate's menu (fog, sky, wind and the
+    // detailed atmosphere values) as text, one "key=value" a line; empty when none is set.
+    static int controls_text(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "world.environment", "reskate.world.controls_text");
+        const auto text = game_of(plugin).world_controls_text();
+        lua_pushlstring(L, text.data(), text.size());
+        return 1;
+    }
+    // set_atmosphere({["Fog.Enable"] = 1, ["Fog.FogColor"] = "0,1450,2500", ...}): atmosphere values (as
+    // controls_text names them) set together, each a number, "a,b,c" lanes, or "default" for the level's
+    // own; saved in the player's profile as the menu's are. At most 64, one change of the four a second.
+    static int set_atmosphere(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "world.environment", "reskate.world.set_atmosphere");
+        luaL_checktype(L, 1, LUA_TTABLE);
+        std::vector<std::pair<std::string, std::string>> values;
+        lua_pushnil(L);
+        while (lua_next(L, 1)) {
+            if (lua_type(L, -2) != LUA_TSTRING) luaL_error(L, "an atmosphere value's key is its name");
+            std::size_t key_length{}, value_length{};
+            const char* key = lua_tolstring(L, -2, &key_length);
+            if (lua_type(L, -1) != LUA_TSTRING && lua_type(L, -1) != LUA_TNUMBER) luaL_error(L, "an atmosphere value is a number or text");
+            const char* value = lua_tolstring(L, -1, &value_length); // a number becomes its text here
+            if (key_length > 60 || value_length > 120 || values.size() >= 64) luaL_error(L, "at most 64 atmosphere values, each a short name and value");
+            values.emplace_back(std::string(key, key_length), std::string(value, value_length));
+            lua_pop(L, 1);
+        }
+        if (!within(plugin.services_.now_ms(), plugin.environment_second_, plugin.environments_, 4)) return result(L, "more than 4 changes in a second");
+        return result(L, game_of(plugin).set_atmosphere(values));
+    }
     // ---- travel ------------------------------------------------------------------------------------
     static int locations(lua_State* L) {
         auto& plugin = plugin_of(L);
@@ -1441,9 +1557,13 @@ struct WorldApi {
         lua_pop(L, 1);
         return shown;
     }
-    // skater.carry({at = vector, rotation = {x, y, z, w}, hand, both, front, grip, weight, crouch, hunch,
-    // still, turn, step, step_phase, push_straightens, shown}): something held out in the hands and
-    // aimed, its front at `at`; for 0.3 s, so every tick. nil lets it go.
+    // skater.carry({at = vector, rotation = {x, y, z, w}, hand, both, support, exact, look_at, front, grip,
+    // weight, crouch, hunch, still, turn, step, step_phase, push_straightens, shown}): something held out in
+    // the hands and aimed, its front at `at`; for 0.3 s, so every tick. nil lets it go. `support` (a vector,
+    // at most 0.3 m each way): with both, the other hand moved from where it takes the item, in the item's
+    // frame. `exact`: the front held at `at` itself (kept out of the body and in the arm's reach) instead of
+    // where the aim puts it, for a plugin that sweeps it itself. `look_at` (a point in the world, within 3 m
+    // of `at`): the neck and head turned so the face looks at it.
     static int carry(lua_State* L) {
         auto& plugin = plugin_of(L);
         need(L, plugin, "skater.animation", "reskate.skater.carry");
@@ -1460,8 +1580,26 @@ struct WorldApi {
         lua_getfield(L, 1, "both");
         goal.both = lua_toboolean(L, -1);
         lua_pop(L, 1);
+        lua_getfield(L, 1, "support");
+        if (!lua_isnil(L, -1)) {
+            goal.support = position_of(L, lua_gettop(L), "a carry's support");
+            for (const auto v : goal.support)
+                if (!(std::abs(v) <= 0.3f)) luaL_error(L, "a carry's support is at most 0.3 m on each axis");
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, 1, "exact");
+        goal.exact = lua_toboolean(L, -1);
+        lua_pop(L, 1);
         lua_getfield(L, 1, "at");
         goal.front = position_of(L, lua_gettop(L), "the carry's point");
+        lua_pop(L, 1);
+        lua_getfield(L, 1, "look_at");
+        if (!lua_isnil(L, -1)) {
+            const auto look = position_of(L, lua_gettop(L), "a carry's look_at");
+            const float dx = look[0] - goal.front[0], dy = look[1] - goal.front[1], dz = look[2] - goal.front[2];
+            if (!(dx * dx + dy * dy + dz * dz <= 9.0f)) luaL_error(L, "a carry's look_at is within 3 m of its point");
+            goal.look_at = look;
+        }
         lua_pop(L, 1);
         lua_getfield(L, 1, "rotation");
         if (lua_isnil(L, -1)) luaL_error(L, "a carry needs a rotation {x, y, z, w}: the way the thing held points");
@@ -2035,6 +2173,23 @@ struct WorldApi {
         luaL_argerror(L, index, "a part is \"deck\", \"grip\", \"trucks\" or \"wheels\"");
         return 0;
     }
+    // Preview material access needs the room permission as well as board, and never selects an actor by pointer.
+    static int board_parameter_scopes(lua_State* L) {
+        auto& plugin = plugin_of(L);
+        need(L, plugin, "board", "reskate.board.parameter_scopes");
+        lua_createtable(L, 2, 0);
+        lua_pushstring(L, "gameplay"); lua_rawseti(L, -2, 1);
+        lua_pushstring(L, "preview"); lua_rawseti(L, -2, 2);
+        return 1;
+    }
+    static bool board_preview(lua_State* L, Plugin& plugin, int index) {
+        if (lua_isnoneornil(L, index)) return false;
+        const std::string_view scope = luaL_checkstring(L, index);
+        if (scope == "gameplay") return false;
+        if (scope != "preview") luaL_argerror(L, index, "scope is \"gameplay\" or \"preview\"");
+        need(L, plugin, "room", "preview board parameters");
+        return true;
+    }
     static std::uint64_t board_parameter_key(lua_State* L, int index) {
         std::size_t length{};
         const char* text = luaL_checklstring(L, index, &length);
@@ -2045,7 +2200,8 @@ struct WorldApi {
         if (length != 16 || error != std::errc{} || end != text + length) luaL_argerror(L, index, "a key is 16 hex digits, \"graphic\" or \"base\"");
         return key;
     }
-    // parameters(part): {{key = "873f48af36e50d59", name = "graphic", type = "colour", value = {r, g, b}}, ...}
+    // Scope defaults to gameplay; preview requires room permission and the observed preview item's own declarations.
+    // parameters(part [, scope]): {{key = "873f48af36e50d59", name = "graphic", type = "colour", value = {r, g, b}}, ...}
     // as the part's material holds them now, or nil without a board. A number's value is a number, an
     // integer's an integer, a switch's true or false. A colour or a number the equipped item's mod
     // declares (reskate-materials.json) that the material does not hold yet comes with inherited =
@@ -2053,7 +2209,7 @@ struct WorldApi {
     static int board_parameters(lua_State* L) {
         auto& plugin = plugin_of(L);
         need(L, plugin, "board", "reskate.board.parameters");
-        const auto found = game_of(plugin).board_parameters(board_part(L, 1));
+        const auto found = game_of(plugin).board_parameters(board_part(L, 1), board_preview(L, plugin, 2));
         if (!found) {
             lua_pushnil(L);
             return 1;
@@ -2098,7 +2254,7 @@ struct WorldApi {
         }
         return 1;
     }
-    // set_parameter(part, key, value): a colour {r, g, b} (0 to 1) or a number held on the part until
+    // set_parameter(part, key, value [, scope]): a colour {r, g, b} (0 to 1) or a number held on the part until
     // cleared, on this screen; an integer or a switch is only read. A colour the equipped item's mod
     // declares is added to the material and goes back to its declared default when let go, or when
     // that item is no longer on the board.
@@ -2122,16 +2278,16 @@ struct WorldApi {
             value[0] = static_cast<float>(luaL_checknumber(L, 3));
         }
         if (!std::all_of(value.begin(), value.end(), [](float v) { return std::isfinite(v); })) luaL_argerror(L, 3, "a value is finite");
-        return result(L, game_of(plugin).board_set_parameter(plugin.id(), part, key, value, colour));
+        return result(L, game_of(plugin).board_set_parameter(plugin.id(), part, key, value, colour, board_preview(L, plugin, 4)));
     }
-    // clear_parameter([part [, key]]): what the plugin holds there put back (every part, every key).
+    // clear_parameter([part [, key [, scope]]]): what the plugin holds there put back (every part, every key).
     static int board_clear_parameter(lua_State* L) {
         auto& plugin = plugin_of(L);
         need(L, plugin, "board", "reskate.board.clear_parameter");
         const int part = lua_isnoneornil(L, 1) ? -1 : board_part(L, 1);
         std::optional<std::uint64_t> key;
         if (!lua_isnoneornil(L, 2)) key = board_parameter_key(L, 2);
-        game_of(plugin).board_clear_parameter(plugin.id(), part, key);
+        game_of(plugin).board_clear_parameter(plugin.id(), part, key, board_preview(L, plugin, 3));
         return 0;
     }
     // ---- outfit ------------------------------------------------------------------------------------------
@@ -3243,8 +3399,10 @@ struct WorldApi {
         return result(L, game_of(plugin).hide_pad(plugin.id(), hidden));
     }
     // screen.look({bend, fov, bars, hood, grade, soft, scanlines, grain, age, dropouts, head_switching,
-    // tracking, smear, iris, rolling, text}): a camcorder look over the game's picture for 0.3 s, so
-    // every tick; nil ends it. One plugin at a time.
+    // tracking, smear, iris, rolling, text, strengths}): a camcorder look over the game's picture for 0.3 s,
+    // so every tick; nil ends it. One plugin at a time. `strengths` = {bars = 0..1, hood, grade, soft,
+    // scanlines, grain, dropouts, head_switching, smear}: how strongly each is drawn while it is on (1
+    // when not given; one that is off stays off).
     static int screen_look(lua_State* L) {
         auto& plugin = plugin_of(L);
         need(L, plugin, "overlay", "reskate.screen.look");
@@ -3274,6 +3432,24 @@ struct WorldApi {
         look.fov = static_cast<float>(number("fov", 60, 5, 170, "a look's fov is 5 to 170 degrees"));
         look.age = static_cast<float>(number("age", 0, 0, 1, "a look's tape age is 0 to 1"));
         look.rolling = number("rolling", -1, 0, 1e7, "a look's rolling is the seconds since the tape started, 0 or more");
+        lua_getfield(L, 1, "strengths");
+        if (!lua_isnil(L, -1)) {
+            luaL_checktype(L, -1, LUA_TTABLE);
+            const int strengths = lua_gettop(L);
+            const auto strength = [&](const char* name, float& into) {
+                lua_getfield(L, strengths, name);
+                if (!lua_isnil(L, -1)) {
+                    const double v = luaL_checknumber(L, -1);
+                    if (!(v >= 0 && v <= 1)) luaL_error(L, "a look's %s strength is 0 to 1", name);
+                    into = static_cast<float>(v);
+                }
+                lua_pop(L, 1);
+            };
+            strength("bars", look.bars_strength), strength("hood", look.hood_strength), strength("grade", look.grade_strength);
+            strength("soft", look.soft_strength), strength("scanlines", look.scanlines_strength), strength("grain", look.grain_strength);
+            strength("dropouts", look.dropouts_strength), strength("head_switching", look.head_switching_strength), strength("smear", look.smear_strength);
+        }
+        lua_pop(L, 1);
         lua_getfield(L, 1, "text");
         if (!lua_isnil(L, -1)) {
             luaL_checktype(L, -1, LUA_TTABLE);
@@ -3444,20 +3620,21 @@ void WorldApi::install(Plugin& plugin, lua_State* L) {
     lua_pushstring(L, "locked");
     lua_setfield(L, -2, "__metatable");
     lua_setfield(L, LUA_REGISTRYINDEX, "reskate.permissions");
-    add_functions(L, "skater", {{"state", state}, {"noclip", noclip}, {"boost", boost}, {"freeze", freeze}, {"wipeout", wipeout}, {"xray", xray},
+    add_functions(L, "skater", {{"state", state}, {"surface_sound", surface_sound}, {"noclip", noclip}, {"boost", boost}, {"freeze", freeze}, {"wipeout", wipeout}, {"xray", xray},
                                 {"shape_launch", shape_launch}, {"hide", hide_skater}, {"reach", reach}, {"carry", carry}, {"hand", hand}, {"joint", skater_joint}, {"pose", skater_pose}});
     add_functions(L, "board", {{"motion", board_motion}, {"bones", board_bones}, {"set", board_set}, {"hide", board_hide}, {"clear", board_clear}, {"scale", board_scale},
                                {"park", board_park}, {"fit", board_fit}, {"toss", board_toss}, {"parameters", board_parameters},
-                               {"set_parameter", board_set_parameter}, {"clear_parameter", board_clear_parameter}});
+                               {"set_parameter", board_set_parameter}, {"clear_parameter", board_clear_parameter}, {"parameter_scopes", board_parameter_scopes}});
     add_functions(L, "camera", {{"look", camera_look}, {"set", camera_set}, {"follow", camera_follow}, {"release", camera_release}, {"held", camera_held}, {"get", camera_get}, {"cycle", camera_cycle}});
-    add_functions(L, "trainer", {{"set_point", set_point}, {"back", back}});
+    add_functions(L, "trainer", {{"set_point", set_point}, {"back", back}, {"hold_preset", hold_preset}});
     add_functions(L, "hud", {{"hide", hide_hud}, {"corner", hud_corner}, {"score_line", score_line}});
     add_functions(L, "time", {{"slow", slow}, {"speed", speed}});
     add_functions(L, "objects", {{"catalog", catalog}, {"list", objects}, {"place", place}, {"move", move}, {"remove", remove}});
     add_functions(L, "entities", {{"set", entities_set}, {"remove", entities_remove}, {"clear", entities_clear}, {"status", entities_status},
                                   {"ready", entities_ready}, {"blueprints", entities_blueprints},
                                   {"bounds", entities_bounds}});
-    add_functions(L, "world", {{"set_time", set_time}, {"set_control", set_control}, {"set_park", set_park}, {"pick", world_pick}, {"probe", world_probe}});
+    add_functions(L, "world", {{"set_time", set_time}, {"time", time_now}, {"set_control", set_control}, {"set_park", set_park}, {"controls", controls},
+                               {"controls_text", controls_text}, {"set_atmosphere", set_atmosphere}, {"pick", world_pick}, {"probe", world_probe}});
     add_functions(L, "travel", {{"locations", locations}, {"levels", levels}, {"go", go}, {"load", load}});
     add_functions(L, "ai", {{"spawn", ai_spawn}, {"clear", ai_clear}, {"count", ai_count}});
     add_functions(L, "session", {{"skaters", skaters}, {"tag", tag}, {"nametags", nametags}, {"joint", session_joint}, {"touch", session_touch},

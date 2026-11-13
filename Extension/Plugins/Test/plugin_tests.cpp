@@ -329,6 +329,42 @@ struct FakeGame final : Game {
     }
     void effects_clear(std::string_view plugin) override { std::erase_if(effects, [&](const auto& e) { return e.second.owner == plugin; }); }
     std::pair<bool, std::uint64_t> effects_state() override { return {effects_ready, effect_epoch}; }
+    // One plugin's world cover at a time, as the real one.
+    std::string coverer;
+    std::string world_cover_clear(std::string_view plugin, const std::vector<CoverClear>& places) override {
+        if (coverer != plugin) return "this plugin has no cover on the world";
+        std::string line = std::format("keep clear {} {}", plugin, places.size());
+        for (const auto& p : places) {
+            line += std::format(" ({:.1f} {:.1f} {:.1f} r{:.2f} h{:.1f}", p.foot[0], p.foot[1], p.foot[2], p.radius, p.height);
+            if (p.snow > 0) line += std::format(" s{:.2f}", p.snow);
+            if (p.length > 0)
+                line += std::format(" l{:.2f} f{:.1f},{:.1f},{:.1f} u{:.1f},{:.1f},{:.1f}", p.length, p.forward[0], p.forward[1], p.forward[2], p.up[0], p.up[1], p.up[2]);
+            line += ")";
+        }
+        calls.push_back(line);
+        return {};
+    }
+    std::string world_cover_trail(std::string_view plugin, const CoverTrail& point) override {
+        if (coverer != plugin) return "this plugin has no cover on the world";
+        calls.push_back(std::format("trail {} {:.1f} {:.1f} {:.1f} w{:.2f} f{:.1f}{}{}", plugin, point.at[0], point.at[1], point.at[2], point.width, point.fade,
+                                    point.tread > 0 ? std::format(" t{:.2f}", point.tread) : std::string{}, point.starts ? " new" : ""));
+        return {};
+    }
+    std::string world_cover(std::string_view plugin, std::optional<WorldCover> c) override {
+        if (!coverer.empty() && coverer != plugin) return c ? coverer + " has the world's cover" : std::string{};
+        if (!c) {
+            if (coverer == plugin) {
+                coverer.clear();
+                calls.push_back(std::format("cover {} none", plugin));
+            }
+            return {};
+        }
+        coverer = plugin;
+        cover_asked = c;
+        calls.push_back(std::format("cover {} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f}", plugin, c->colour[0], c->colour[1],
+                                    c->colour[2], c->amount, c->facing, c->softness, c->brightness, c->breakup, c->sparkle, c->snowfall));
+        return {};
+    }
     ObjectPhysicsClaims physics_claims;
     std::map<std::uint64_t, ObjectPhysics> object_physics_now;
     std::map<std::uint64_t, ObjectMotion> object_motion_now;
@@ -371,6 +407,34 @@ struct FakeGame final : Game {
     }
     std::optional<MarkerEvents> marker_events(std::string_view plugin) override {
         return std::exchange(marker_feed[std::string(plugin)], {});
+    }
+    std::string tod_now = "afternoon";
+    std::string time_of_day_now() override { return tod_now; }
+    std::string world_controls_text() override { return "fog=1\nfog_distance=0.5\n"; }
+    std::vector<std::pair<std::string, std::string>> atmosphere_set;
+    std::string set_atmosphere(const std::vector<std::pair<std::string, std::string>>& values) override {
+        atmosphere_set.insert(atmosphere_set.end(), values.begin(), values.end());
+        return {};
+    }
+    std::optional<WorldCover> cover_asked;
+    std::optional<std::uint32_t> surface_set;
+    std::uint32_t surface_fields{};
+    std::string skater_surface_sound(std::string_view, std::optional<std::uint32_t> word, std::uint32_t fields) override {
+        surface_set = word;
+        surface_fields = fields;
+        return {};
+    }
+    // Each trainer preset held (its name, and its values) or let go (nullopt).
+    std::vector<std::optional<std::pair<std::string, std::map<std::string, double, std::less<>>>>> trainer_presets;
+    std::string trainer_preset(std::string_view, std::string_view name, std::optional<std::map<std::string, double, std::less<>>> values) override {
+        if (values) trainer_presets.emplace_back(std::pair(std::string(name), std::move(*values)));
+        else trainer_presets.emplace_back(std::nullopt);
+        return {};
+    }
+    std::vector<std::pair<std::string, bool>> chosen_variants; // each choice, and whether it went in now
+    std::string choose_variant(std::string_view, const std::filesystem::path&, std::string_view variant, bool now) override {
+        chosen_variants.emplace_back(std::string(variant), now);
+        return {};
     }
     std::optional<std::uint32_t> state;
     std::uint64_t wipe{};
@@ -457,7 +521,8 @@ struct FakeGame final : Game {
         return found;
     }
     bool declared_holds_deck(int part) const { return declared_rules && part == 0; }
-    std::optional<std::vector<BoardParameter>> board_parameters(int part) override {
+    std::optional<std::vector<BoardParameter>> board_parameters(int part, bool preview_scope = false) override {
+        if (preview_scope) calls.push_back("preview parameters");
         if (declared_holds_deck(part)) {
             std::vector<BoardParameter> out;
             for (const auto& p : board_material::detail::listed(declared_board(), board_material::Part::deck)) {
@@ -473,7 +538,8 @@ struct FakeGame final : Game {
                                            {0xb00abec403499469ULL, "integer", {}, 13},
                                            {0xa5f9a6b8098279adULL, "switch", {}, 1}};
     }
-    std::string board_set_parameter(std::string_view plugin, int part, std::uint64_t key, std::array<float, 3> value, bool colour) override {
+    std::string board_set_parameter(std::string_view plugin, int part, std::uint64_t key, std::array<float, 3> value, bool colour, bool preview_scope = false) override {
+        if (preview_scope) calls.push_back("preview set");
         if (declared_holds_deck(part)) {
             auto why = board_material::detail::take(declared_holds, declared_board(), plugin, board_material::Part::deck, key, value, colour);
             if (why.empty()) calls.push_back(std::format("board parameter {} {} {:016x} {} {:.1f}", plugin, part, key, colour ? "colour" : "number", value[0]));
@@ -482,7 +548,8 @@ struct FakeGame final : Game {
         calls.push_back(std::format("board parameter {} {} {:016x} {} {:.1f}", plugin, part, key, colour ? "colour" : "number", value[0]));
         return {};
     }
-    void board_clear_parameter(std::string_view plugin, int part, std::optional<std::uint64_t> key) override {
+    void board_clear_parameter(std::string_view plugin, int part, std::optional<std::uint64_t> key, bool preview_scope = false) override {
+        if (preview_scope) calls.push_back("preview clear");
         calls.push_back(std::format("board parameter clear {} {} {}", plugin, part, key ? std::format("{:016x}", *key) : "all"));
         board_material::detail::release(declared_holds, plugin, part < 0 ? std::nullopt : std::optional(static_cast<board_material::Part>(part)), key);
     }
@@ -613,6 +680,11 @@ struct FakeGame final : Game {
                                         c->front_from_grip[2], c->worn.has_value(), c->weight, c->crouch, c->hunch, c->turn, c->step,
                                         c->still ? " still" : "", c->push_straightens ? " push" : "", shown_name(c->shown))
                           : std::format("carry {} none", plugin));
+        if (c && (c->support[0] != 0 || c->support[1] != 0 || c->support[2] != 0))
+            calls.push_back(std::format("carry support {} {:.2f} {:.2f} {:.2f}", plugin, c->support[0], c->support[1], c->support[2]));
+        if (c && (c->exact || c->look_at))
+            calls.push_back(std::format("carry held {}{} look {}", plugin, c->exact ? " exact" : "",
+                                        c->look_at ? std::format("{:.1f} {:.1f} {:.1f}", (*c->look_at)[0], (*c->look_at)[1], (*c->look_at)[2]) : "none"));
         return {};
     }
     std::string skater_pose(std::string_view plugin, const std::vector<JointOffset>& offsets, float weight, Shown shown) override {
@@ -684,6 +756,11 @@ struct FakeGame final : Game {
                                         l->grade, l->soft, l->scanlines, l->grain, l->dropouts, l->head_switching, l->tracking, l->smear, l->iris, l->rolling,
                                         l->text[0], l->text[1], l->text[2], l->text[3], l->text[4])
                           : std::format("look {} none", plugin));
+        if (l && (l->bars_strength != 1 || l->hood_strength != 1 || l->grade_strength != 1 || l->soft_strength != 1 || l->scanlines_strength != 1 ||
+                  l->grain_strength != 1 || l->dropouts_strength != 1 || l->head_switching_strength != 1 || l->smear_strength != 1))
+            calls.push_back(std::format("look strengths {} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f}", plugin, l->bars_strength,
+                                        l->hood_strength, l->grade_strength, l->soft_strength, l->scanlines_strength, l->grain_strength,
+                                        l->dropouts_strength, l->head_switching_strength, l->smear_strength));
         return {};
     }
     // One plugin's viewmodel at a time, as the real one.
@@ -875,6 +952,7 @@ struct FakeGame final : Game {
         calls.push_back(std::format("env {} {} {}", kind, key, value));
         return key == "never" ? "refused" : "";
     }
+    std::vector<std::pair<std::string, double>> world_controls() override { return {{"fog", 0}, {"fog_distance", 1.5}, {"clouds", -1}}; }
     std::vector<Destination> destinations() override { return {{"bam", "BAM", "bam"}}; }
     std::vector<LevelInfo> levels() override { return {{"Levels/Game/X/X", "X", true}}; }
     std::string travel(std::string_view kind, std::string_view target) override { calls.push_back(std::format("travel {} {}", kind, target)); return {}; }
@@ -1222,6 +1300,7 @@ struct FakeGame final : Game {
         score_lines.release(plugin);
         entity_clear(plugin);
         effects_clear(plugin);
+        (void)world_cover(plugin, std::nullopt);
         viewmodel_unload(plugin);
         board_material::detail::release(declared_holds, plugin, std::nullopt, std::nullopt);
         std::vector<std::uint64_t> ids;
@@ -1457,6 +1536,89 @@ Candidate script(const std::string& id, const std::string& main, const std::stri
 }
 
 void running(const Host& host, std::string_view id, const TestEnvironment& environment);
+
+void the_time_of_day_is_read_and_the_cover_melts() {
+    TestEnvironment environment;
+    Host host(environment, Side::client);
+    host.apply({script("melt", R"(
+        assert(reskate.world.time() == "afternoon")
+        assert(reskate.world.controls_text() == "fog=1\nfog_distance=0.5\n")
+        assert(reskate.world.set_atmosphere({["Fog.Enable"] = 1, ["Fog.FogColor"] = "0,1450,2500"}))
+        assert(not pcall(reskate.world.set_atmosphere, {["Fog.Enable"] = true}), "a value is a number or text")
+        assert(reskate.effects.cover({left = 0.25, snowfall_stopping = true}))
+        assert(not pcall(reskate.effects.cover, {left = 2}), "left is 0 to 1")
+    )", R"("world.environment", "effects")")});
+    running(host, "melt", environment);
+    check(environment.fake.cover_asked && environment.fake.cover_asked->left == 0.25f && environment.fake.cover_asked->snowfall_stopping, "a cover's melt is passed on: how much of it is left");
+    TestEnvironment denied_environment;
+    Host denied(denied_environment, Side::client);
+    denied.apply({script("melt-denied", R"(
+        assert(not pcall(reskate.world.time), "needs world.environment")
+    )")});
+    running(denied, "melt-denied", denied_environment);
+}
+
+void the_skater_surface_sound_is_set_for_some_fields() {
+    TestEnvironment environment;
+    Host host(environment, Side::client);
+    host.apply({script("surface-sound", R"(
+        assert(reskate.skater.surface_sound(0xd60, {1, 3}))
+        assert(not pcall(reskate.skater.surface_sound, 0xd60, {19}), "fields are 1 to 18")
+        assert(not pcall(reskate.skater.surface_sound, 0.5), "a fraction is no surface")
+        assert(not pcall(reskate.skater.surface_sound, -1), "a negative is no surface")
+    )", R"("skater.control")")});
+    running(host, "surface-sound", environment);
+    check(environment.fake.surface_set == 0xd60u && environment.fake.surface_fields == 0b101u,
+          "surface_sound passes the surface word and its fields on");
+    TestEnvironment denied_environment;
+    Host denied(denied_environment, Side::client);
+    denied.apply({script("surface-denied", R"(
+        assert(not pcall(reskate.skater.surface_sound, 7), "needs skater.control")
+    )")});
+    running(denied, "surface-denied", denied_environment);
+    check(!denied_environment.fake.surface_set, "a plugin without skater.control set no surface sound");
+}
+
+void a_variant_can_wait_for_the_next_launch() {
+    TestEnvironment environment;
+    Host host(environment, Side::client);
+    host.apply({script("variant-chooser", R"(
+        assert(reskate.package.choose("snowskate"))
+        assert(reskate.package.choose("standard", {now = false}))
+        assert(reskate.package.choose("standard", {now = true}))
+        assert(not pcall(reskate.package.choose, "standard", 7), "options are a table")
+    )", R"("variants")")});
+    running(host, "variant-chooser", environment);
+    const std::vector<std::pair<std::string, bool>> expected{{"snowskate", true}, {"standard", false}, {"standard", true}};
+    check(environment.fake.chosen_variants == expected, "choose keeps a variant for the next launch only when now is false");
+}
+
+void a_plugin_holds_a_trainer_preset() {
+    TestEnvironment environment;
+    Host host(environment, Side::client);
+    host.apply({script("preset-holder", R"(
+        assert(reskate.trainer.hold_preset("SnowSkate", {["PhysicsMode.JumpMaxHeight"] = 1.29, ["trick.gravity"] = 1.15}))
+        assert(reskate.trainer.hold_preset(nil))
+        assert(not pcall(reskate.trainer.hold_preset, "", {a = 1}), "a name is needed")
+        assert(not pcall(reskate.trainer.hold_preset, "x", {}), "a value is needed")
+        assert(not pcall(reskate.trainer.hold_preset, "x", {a = "high"}), "values are numbers")
+    )", R"("trainer")")});
+    running(host, "preset-holder", environment);
+    const auto& held = environment.fake.trainer_presets;
+    check(held.size() == 2 && held[0] && held[0]->first == "SnowSkate" && held[0]->second.size() == 2 &&
+              held[0]->second.contains("physicsmode.jumpmaxheight") && held[0]->second.at("trick.gravity") == 1.15 && !held[1],
+          "a preset is held with its values (ids in lower case), then let go");
+
+    // Without the permission it is refused.
+    TestEnvironment denied_environment;
+    Host denied(denied_environment, Side::client);
+    denied.apply({script("preset-denied", R"(
+        local ok, why = pcall(reskate.trainer.hold_preset, "SnowSkate", {a = 1})
+        assert(not ok and why:find("trainer", 1, true), tostring(why))
+    )")});
+    running(denied, "preset-denied", denied_environment);
+    check(denied_environment.fake.trainer_presets.empty(), "a plugin without trainer held a trainer preset");
+}
 
 void traffic_vehicles_are_permissioned_bounded_and_released() {
     using traffic_vehicles::Quaternion;
@@ -4612,6 +4774,9 @@ void plugins_reach_cruise_and_read_the_mouse() {
         assert(not pcall(reskate.screen.look, {text = {"far too long a line"}}), "12 characters")
         assert(not pcall(reskate.screen.look, {text = {"{}"}}), "the camcorder's characters")
         assert(not pcall(reskate.screen.look, {text = {"a", "b", "c", "d", "e", "f"}}), "5 lines")
+        assert(reskate.screen.look({grade = true, grain = true, strengths = {grade = 0.6, grain = 0.25, smear = 0}}))
+        assert(not pcall(reskate.screen.look, {grade = true, strengths = {grade = 1.5}}), "a strength is 0 to 1")
+        assert(not pcall(reskate.screen.look, {strengths = {hood = "half"}}), "a strength is a number")
         reskate.log("filmed")
     )";
     host.apply({package("filmer", {{manifest_file, manifest(R"("skater.animation", "skater.read", "skater.control", "input", "overlay")")}, {"plugin/main.lua", main}})});
@@ -4627,6 +4792,8 @@ void plugins_reach_cruise_and_read_the_mouse() {
     check(game.called("look filmer 0.80 110 0.35 truetruetruefalsefalsetruefalsefalsefalsefalsetrue 2.0 [#REC|0:00:02||4:05 PM|OCT.20 2026]") &&
               game.called("slap filmer") && game.called("look filmer none"),
           "A camcorder look on the screen, its text in capitals, a slap, and off\n" + environment.all());
+    check(game.called("look strengths filmer 1.00 1.00 0.60 1.00 1.00 0.25 1.00 1.00 0.00"),
+          "A look's effects at part strength reach the game, 1 for those not given\n" + environment.all());
     // Each needs its permission.
     host.apply({package("sneaky", {{manifest_file, manifest()}, {"plugin/main.lua", R"(
         reskate.log(tostring(pcall(reskate.skater.reach, {at = vector.create(0, 0, 0)})) .. " " .. tostring(pcall(reskate.skater.hand)) .. " " ..
@@ -4635,6 +4802,91 @@ void plugins_reach_cruise_and_read_the_mouse() {
     ticks(host, environment, 1);
     check(environment.logged("[sneaky] false false false false false"),
           "skater.animation, skater.read, skater.control, input and overlay are needed\n" + environment.all());
+}
+
+// A cover over the world's upward-facing surfaces (reskate.effects.cover): its values checked, one plugin's at a
+// time, ended by the plugin or by its unloading, and only with "effects".
+void plugins_cover_the_world() {
+    TestEnvironment environment;
+    auto& game = environment.fake;
+    Host host(environment, Side::client);
+    const auto snow = package("snow", {{manifest_file, manifest(R"("effects")")}, {"plugin/main.lua", R"(
+        assert(reskate.effects.cover({colour = {r = 0.9, g = 0.95, b = 1}, amount = 0.8, facing = 0.6, softness = 0.1, brightness = 2,
+            breakup = 0.5, sparkle = 0.25, snowfall = 0.6}))
+        assert(not pcall(reskate.effects.cover, {snowfall = 1.5}), "a snowfall is 0 to 1")
+        assert(not pcall(reskate.effects.cover, {fall_speed = 9}), "a fall speed is 0.1 to 4")
+        assert(not pcall(reskate.effects.cover, {amount = 2}), "an amount is 0 to 1")
+        assert(not pcall(reskate.effects.cover, {facing = -0.1}), "a facing is 0 to 1")
+        assert(not pcall(reskate.effects.cover, {brightness = 9}), "a brightness is 0.25 to 4")
+        assert(not pcall(reskate.effects.cover, {colour = {r = 1, g = 2, b = 0}}), "a colour is 0 to 1 a channel")
+        assert(not pcall(reskate.effects.cover, {colour = {r = 1}}), "a colour has three channels")
+        assert(not pcall(reskate.effects.cover, 5), "a cover is a table or nil")
+        assert(reskate.effects.cover({}), "every value has a default")
+        assert(reskate.effects.keep_clear({{position = vector.create(1, 2, 3)}, {position = vector.create(4, 5, 6), radius = 1.5, height = 3}}))
+        assert(not pcall(reskate.effects.keep_clear, {{position = vector.create(0, 0, 0), radius = 20}}), "a radius is 0.05 to 10")
+        assert(not pcall(reskate.effects.keep_clear, {{radius = 1}}), "a place has a position")
+        assert(reskate.effects.keep_clear({{position = vector.create(7, 0, 7), snow = 0.4}}), "snow on what stands in a place")
+        assert(reskate.effects.keep_clear({{position = vector.create(1, 2, 3)}, {position = vector.create(0, 0, 0), length = 0.8,
+            radius = 0.1, height = 0.05, snow = 0.3, forward = vector.create(2, 1, 0)}}), "a board-shaped place")
+        assert(not pcall(reskate.effects.keep_clear, {{position = vector.create(0, 0, 0), length = 0.8, forward = vector.create(0, 3, 0)}}),
+            "a board's forward is not its up")
+        assert(not pcall(reskate.effects.keep_clear, {{position = vector.create(0, 0, 0), snow = 2}}), "a place's snow is 0 to 1")
+        assert(reskate.effects.trail({position = vector.create(1, 0, 2)}))
+        assert(reskate.effects.trail({position = vector.create(1, 0, 3), width = 0.3, fade = 12}))
+        assert(reskate.effects.trail({position = vector.create(1, 0, 4), tread = 0.22}), "a trail with a tread")
+        assert(not pcall(reskate.effects.trail, {position = vector.create(0, 0, 0), tread = 2}), "a tread is 0 to 1 m")
+        assert(reskate.effects.trail({position = vector.create(1, 0, 5), starts = true}), "a point starting a new trail")
+        assert(not pcall(reskate.effects.trail, {position = vector.create(0, 0, 0), starts = 1}), "starts is true or false")
+        assert(not pcall(reskate.effects.trail, {position = vector.create(0, 0, 0), fade = 100}), "a fade is 0.5 to 60 s")
+        assert(not pcall(reskate.effects.trail, {width = 0.2}), "a trail point has a position")
+        local four = {}
+        for i = 1, 4 do four[i] = {position = vector.create(i, 0, 0)} end
+        assert(not pcall(reskate.effects.keep_clear, four), "at most three places")
+        assert(reskate.effects.keep_clear(nil))
+        reskate.log("covered")
+    )"}});
+    host.apply({snow});
+    ticks(host, environment, 1);
+    running(host, "snow", environment);
+    check(environment.logged("[snow] covered"), "A cover's values are checked\n" + environment.all());
+    check(game.called("cover snow 0.90 0.95 1.00 0.80 0.60 0.10 2.00 0.50 0.25 0.60") &&
+              game.called("cover snow 0.92 0.95 1.00 1.00 0.55 0.15 1.60 0.35 0.00 0.00"),
+          "The cover as asked, and its defaults\n" + environment.all());
+    check(game.called("keep clear snow 2 (1.0 2.0 3.0 r0.60 h2.0) (4.0 5.0 6.0 r1.50 h3.0)") && game.called("keep clear snow 0"),
+          "Places kept clear of the cover, with their defaults, and none\n" + environment.all());
+    check(game.called("keep clear snow 1 (7.0 0.0 7.0 r0.60 h2.0 s0.40)"), "Snow on what stands in a place\n" + environment.all());
+    check(game.called("keep clear snow 2 (1.0 2.0 3.0 r0.60 h2.0) (0.0 0.0 0.0 r0.10 h0.1 s0.30 l0.80 f1.0,0.0,0.0 u0.0,1.0,0.0)"),
+          "A board-shaped place, its forward made square to its up\n" + environment.all());
+    check(game.called("trail snow 1.0 0.0 2.0 w0.25 f10.0") && game.called("trail snow 1.0 0.0 3.0 w0.30 f12.0") &&
+              game.called("trail snow 1.0 0.0 4.0 w0.25 f10.0 t0.22") &&
+              game.called("trail snow 1.0 0.0 5.0 w0.25 f10.0 new"),
+          "Trail points, with their defaults\n" + environment.all());
+    // A second plugin is told whose cover it is; nil from it does not end the first one's.
+    host.apply({snow, package("sand", {{manifest_file, manifest(R"("effects")")}, {"plugin/main.lua", R"(
+        local ok, why = reskate.effects.cover({colour = {r = 0.8, g = 0.7, b = 0.5}})
+        reskate.log(tostring(ok) .. " " .. tostring(why))
+        local kept, not_why = reskate.effects.keep_clear({{position = vector.create(0, 0, 0)}})
+        reskate.log("keep " .. tostring(kept) .. " " .. tostring(not_why))
+        assert(reskate.effects.cover(nil))
+    )"}})});
+    ticks(host, environment, 1);
+    check(environment.logged("[sand] nil snow has the world's cover") && !game.called("cover sand none") && game.coverer == "snow",
+          "One plugin's cover at a time\n" + environment.all());
+    check(environment.logged("[sand] keep nil this plugin has no cover on the world"), "Only the cover's plugin keeps places clear of it");
+    // Without the permission it is refused.
+    host.apply({snow, package("sneaky", {{manifest_file, manifest()}, {"plugin/main.lua", R"(
+        reskate.log(tostring(pcall(reskate.effects.cover, {})) .. " " .. tostring(pcall(reskate.effects.cover, nil)) .. " " ..
+            tostring(pcall(reskate.effects.keep_clear, {})) .. " " .. tostring(pcall(reskate.world.controls)) .. " " ..
+            tostring(pcall(reskate.effects.trail, {position = vector.create(0, 0, 0)})))
+    )"}})});
+    ticks(host, environment, 1);
+    check(environment.logged("[sneaky] false false false false false"),
+          "effects is needed for a cover and its clear places, world.environment to read the world controls\n" + environment.all());
+    check(game.coverer == "snow", "A refused plugin does not take the cover");
+    // Unloading the plugin ends its cover.
+    host.apply({});
+    ticks(host, environment, 1);
+    check(game.called("cover snow none") && game.coverer.empty(), "Unloading the plugin ends its cover\n" + environment.all());
 }
 
 // What the Filmer's port needs besides: something carried (seen by the others only), a pose only you
@@ -4651,6 +4903,12 @@ void plugins_carry_and_take_a_step_in_the_camera_cycle() {
             grip = {rotation = {0.5, -0.5, 0.5, 0.5}, offset = vector.create(0.12, 0.04, -0.03)}, crouch = 0.22, hunch = 1.0, turn = 0.5,
             step = 0.5, step_phase = 1.25, still = true, push_straightens = true, weight = 0.75, shown = "others"}))
         assert(reskate.skater.carry({hand = "left", at = vector.create(0, 1, 0), rotation = {0, 0, 0, 1}}))
+        assert(reskate.skater.carry({at = vector.create(0, 1, 0), rotation = {0, 0, 0, 1}, both = true, support = vector.create(0.02, -0.05, 0.1)}))
+        assert(not pcall(reskate.skater.carry, {at = vector.create(0, 1, 0), rotation = {0, 0, 0, 1}, support = vector.create(0, 0.5, 0)}),
+            "a support is at most 0.3 m each way")
+        assert(reskate.skater.carry({at = vector.create(0, 1, 0), rotation = {0, 0, 0, 1}, exact = true, look_at = vector.create(0, 1.2, -0.1)}))
+        assert(not pcall(reskate.skater.carry, {at = vector.create(0, 1, 0), rotation = {0, 0, 0, 1}, look_at = vector.create(0, 9, 0)}),
+            "a look_at is within 3 m")
         assert(reskate.skater.carry(nil))
         assert(not pcall(reskate.skater.carry, {at = vector.create(0, 1, 0)}), "a carry needs a rotation")
         assert(not pcall(reskate.skater.carry, {at = vector.create(0, 1, 0), rotation = {0, 0, 0, 1}, crouch = 1}), "a crouch is 0 to 0.6 m")
@@ -4680,6 +4938,8 @@ void plugins_carry_and_take_a_step_in_the_camera_cycle() {
               game.called("carry filmer left 0.0 1.0 0.0 front 0.00 grip false w 1.00 crouch 0.00 hunch 0.00 turn 0.00 step 0.00 everyone") &&
               game.called("carry filmer none"),
           "Carried in both hands for the others, in one, and let go\n" + environment.all());
+    check(game.called("carry support filmer 0.02 -0.05 0.10"), "The other hand moved where it takes the item\n" + environment.all());
+    check(game.called("carry held filmer exact look 0.0 1.2 -0.1"), "Held where asked, the face on it\n" + environment.all());
     check(game.called("pose filmer 1.00 me 48:0.00,0.00,0.00,1.00x0.00") && game.called("reach filmer right 1.0 2.0 3.0 false 1.00 others"),
           "A pose only you see, a reach only the others see\n" + environment.all());
     check(game.called("cycle filmer ready") && game.called("cycle filmer active") && game.called("cycle filmer out"), "In the cycle, on, and out");
@@ -6108,6 +6368,40 @@ void web_requests_go_only_to_listed_domains() {
 }
 
 
+void preview_board_material_scope() {
+    TestEnvironment environment;
+    Host host(environment, Side::client);
+    host.apply({script("preview_material", R"(
+        assert(reskate.board.parameter_scopes()[2] == "preview")
+        assert(#reskate.board.parameters("grip", "preview") == 4)
+        assert(reskate.board.set_parameter("grip", "graphic", {r=.3, g=.4, b=.5}, "preview"))
+        reskate.board.clear_parameter(nil, nil, "preview")
+        assert(not pcall(reskate.board.parameters, "deck", "other"))
+        assert(not pcall(reskate.board.set_parameter, "deck", "base", 1, "other"))
+        assert(not pcall(reskate.board.clear_parameter, nil, nil, "other"))
+        reskate.log("preview material routed")
+    )", R"("board", "room")"), script("preview_denied", R"(
+        local ok, why = pcall(reskate.board.parameters, "deck", "preview")
+        assert(not ok and why:find('needs the "room" permission'), tostring(why))
+        ok, why = pcall(reskate.board.set_parameter, "deck", "base", {r=0,g=0,b=0}, "preview")
+        assert(not ok and why:find('needs the "room" permission'), tostring(why))
+        ok, why = pcall(reskate.board.clear_parameter, nil, nil, "preview")
+        assert(not ok and why:find('needs the "room" permission'), tostring(why))
+        reskate.log("preview room permission enforced")
+    )", R"("board")"), script("preview_no_board", R"(
+        assert(not pcall(reskate.board.parameter_scopes))
+        assert(not pcall(reskate.board.parameters, "deck", "preview"))
+        assert(not pcall(reskate.board.set_parameter, "deck", "base", 0, "preview"))
+        assert(not pcall(reskate.board.clear_parameter, nil, nil, "preview"))
+        reskate.log("preview board permission enforced")
+    )", R"("room")")});
+    check(environment.logged("preview material routed") && environment.logged("preview room permission enforced") &&
+          environment.logged("preview board permission enforced"), "Preview scope permissions\n" + environment.all());
+    const auto& calls = environment.fake.calls;
+    for (const auto* expected : {"preview parameters", "preview set", "preview clear"})
+        check(std::count(calls.begin(), calls.end(), expected) == 1, "Preview scope dispatch once");
+}
+
 void declared_board_colours_through_the_api() {
     TestEnvironment environment;
     environment.fake.declared_rules = true;
@@ -6313,6 +6607,8 @@ void the_wider_set_reaches_the_game() {
             assert(reskate.objects.remove("42"))
             assert(not pcall(reskate.objects.remove, "not a number"))
             assert(reskate.world.set_time("night") and reskate.world.set_control("fog", 1) and reskate.world.set_park("historic", "skatepark_02"))
+            local controls = reskate.world.controls()
+            assert(controls and controls.fog == 0 and controls.fog_distance == 1.5 and controls.clouds == -1, "the world controls as they are")
             local ok, why = reskate.world.set_time("never")
             assert(not ok and why == "refused")
             assert(#reskate.travel.locations() == 1 and #reskate.travel.levels() == 1)
@@ -7080,6 +7376,10 @@ int main() {
         scratch = std::filesystem::temp_directory_path() / "reskate-plugin-tests";
         std::filesystem::remove_all(scratch);
         run(a_manifest_says_what_a_plugin_is);
+        run(a_variant_can_wait_for_the_next_launch);
+        run(a_plugin_holds_a_trainer_preset);
+        run(the_skater_surface_sound_is_set_for_some_fields);
+        run(the_time_of_day_is_read_and_the_cover_melts);
         run(ui_value_reservations_enforce_limits_and_collisions);
         run(plugins_publish_only_their_own_ui_values);
         run(plugin_approval_follows_the_plugins_own_files);
@@ -7148,6 +7448,7 @@ int main() {
         run(plugins_set_the_flip_speed);
         run(plugins_show_a_viewmodel);
         run(plugins_carry_and_take_a_step_in_the_camera_cycle);
+        run(plugins_cover_the_world);
         run(plugins_read_joints_and_tune_physics);
         run(plugins_type_and_use_the_room);
         run(plugins_read_menu_pose);
@@ -7175,6 +7476,7 @@ int main() {
         run(web_requests_go_only_to_listed_domains);
         run(game_menu_distinguishes_unknown_from_closed);
         run(the_wider_set_reaches_the_game);
+        run(preview_board_material_scope);
         run(declared_board_colours_through_the_api);
         run(key_names_become_binds);
         run(level_events_reach_plugins);

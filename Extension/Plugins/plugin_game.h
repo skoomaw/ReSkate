@@ -326,6 +326,47 @@ public:
     virtual std::vector<std::uint64_t> effects_live(std::string_view) { return {}; }
     virtual void effects_clear(std::string_view) {}
     virtual std::pair<bool, std::uint64_t> effects_state() { return {false, 0}; }
+    // A cover over the world's upward-facing surfaces, in the world's picture before post-processing and
+    // the UI (reskate.effects.cover; Extension/UI/Overlay/world_cover.h says what each is). On this
+    // screen only, until ended; empty ends it. One plugin at a time.
+    struct WorldCover {
+        std::array<float, 3> colour{0.92f, 0.95f, 1.0f};
+        float amount{1}, facing{0.55f}, softness{0.15f}, brightness{1.6f}, breakup{0.35f}, sparkle{0}, snowfall{0}, fall_speed{1};
+        float left{1}; // how much of it is left (melting), 0..1, the same everywhere
+        bool snowfall_stopping{}; // the snow stops falling: no new flakes, the last ones fall out
+    };
+    virtual std::string world_cover(std::string_view /*plugin*/, std::optional<WorldCover>) { return unavailable; }
+    // The time of day forced on the map now (morning, noon, afternoon, evening, night, weatherday,
+    // weathernight), "default" for the level's own, or empty with no map.
+    virtual std::string time_of_day_now() { return {}; }
+    // The world controls the player has set in ReSkate's menu (fog, sky, wind and the detailed
+    // atmosphere values), one "key=value" a line; those at the level's own are left out.
+    virtual std::string world_controls_text() { return {}; }
+    // Atmosphere values (the detailed fog, sky and wind ones, as world_controls_text names them) set
+    // together, each a value as text or "default" for the level's own; saved in the player's profile
+    // as the menu's are. Empty, or what was refused.
+    virtual std::string set_atmosphere(const std::vector<std::pair<std::string, std::string>>&) { return unavailable; }
+    // Up to three places kept clear of that cover for the next 300 ms (world_cover::keep_clear): an
+    // upright cylinder each, on its foot in the world. Only for the plugin whose cover it is.
+    struct CoverClear {
+        Vec3 foot{};
+        float radius{0.6f}, height{2.0f};
+        float snow{}; // how much cover shows on what stands in it, 0 to 1
+        // A board-shaped place (length > 0): `foot` its middle, `forward` along it and `up` out of it (unit,
+        // square to each other), `radius` its half width and `height` its thickness.
+        float length{};
+        Vec3 forward{0, 0, 1}, up{0, 1, 0};
+    };
+    virtual std::string world_cover_clear(std::string_view /*plugin*/, const std::vector<CoverClear>&) { return unavailable; }
+    // A point on a trail through that cover (world_cover::add_trail): pressed down `width` wide, filling
+    // back in over `fade` seconds. Only for the plugin whose cover it is.
+    struct CoverTrail {
+        Vec3 at{};
+        float width{0.25f}, fade{10};
+        float tread{}; // a tread's width pressed into it (its lines), or 0
+        bool starts{}; // begins a new trail, not joined to the point before
+    };
+    virtual std::string world_cover_trail(std::string_view /*plugin*/, const CoverTrail&) { return unavailable; }
 
     virtual std::string object_physics(std::string_view, std::uint64_t, const std::optional<ObjectPhysics>&) { return unavailable; }
     virtual std::string object_velocity(std::string_view, std::uint64_t, const Vec3&) { return unavailable; }
@@ -411,6 +452,10 @@ public:
     // "control" (key: fog, fog_distance, sky_brightness, clouds, wind_strength, wind_direction,
     // traffic, pedestrians; value a number, -1 the default) or "park" (key: a lot, value a layout).
     virtual std::string set_environment(std::string_view, std::string_view, std::string_view) { return unavailable; }
+    // The world controls as the player's profile holds them now (the "control" keys above, -1 each one
+    // left to the level), so a plugin that changes one can put the player's own value back; empty
+    // without a profile.
+    virtual std::vector<std::pair<std::string, double>> world_controls() { return {}; }
     virtual std::vector<Destination> destinations() { return {}; }
     virtual std::vector<LevelInfo> levels() { return {}; }
     // kind "location" (a destination's id) or "level" (a level's asset); a guest is refused.
@@ -753,6 +798,11 @@ public:
     virtual std::vector<CycleNews> take_camera_cycle() { return {}; }
     // Holds the skater where it is (noclip, with no input), while any plugin asks.
     virtual std::string freeze(std::string_view /*plugin*/, bool) { return unavailable; }
+    // The local skater's sounds as on the surface a physics material word names, wherever it is, in the
+    // sound's material fields `fields` (bit i: field i + 1); nothing: each surface its own. One plugin at a time.
+    virtual std::string skater_surface_sound(std::string_view /*plugin*/, std::optional<std::uint32_t>, std::uint32_t /*fields*/ = ~0U) {
+        return unavailable;
+    }
     // ---- the session's authority (plugins' server copies) --------------------------------------------
     // Drops a player from the session; a chat line to everyone; one to one player (a dedicated
     // server's only: a lobby has no private chat); moves a player's skater (their game does the move).
@@ -886,6 +936,9 @@ public:
     struct Carry {
         bool left{}, both{};
         Vec3 front{};
+        Vec3 support{}; // with both: the other hand moved from where it takes the item, in the item's frame
+        bool exact{};   // the front held at `front` itself, not on the aim's own sweep
+        std::optional<Vec3> look_at; // the face turned to look at this point
         std::array<float, 4> aim{0, 0, 0, 1};
         Vec3 front_from_grip{};
         // Worn on the hand: the item's rotation in the hand joint's frame, and its grip from the hand joint.
@@ -938,6 +991,9 @@ public:
     }
     virtual std::vector<Tuning> find_tuning(std::string_view /*text*/, std::size_t /*most*/) { return {}; }
     virtual std::string tune(std::string_view /*plugin*/, std::string_view /*id*/, std::optional<double> /*value*/) { return unavailable; }
+    // The plugin's preset held in the trainer (trainer::plugin_preset): no values lets go. Empty when done, else why not.
+    virtual std::string trainer_preset(std::string_view /*plugin*/, std::string_view /*name*/,
+                                       std::optional<std::map<std::string, double, std::less<>>> /*values*/) { return unavailable; }
     virtual std::string replace_trick(std::string_view /*plugin*/, std::string /*trick*/, std::string /*pop*/, ClipRef, float /*speed*/) {
         return unavailable;
     }
@@ -1023,13 +1079,13 @@ public:
         // yet: `value` is the default its shader has; set_parameter adds it.
         bool inherited{};
     };
-    virtual std::optional<std::vector<BoardParameter>> board_parameters(int /*part*/) { return std::nullopt; }
+    virtual std::optional<std::vector<BoardParameter>> board_parameters(int /*part*/, bool /*preview*/ = false) { return std::nullopt; }
     // A colour (`colour`, all three) or a number (value[0]) held there until cleared; empty when held.
-    virtual std::string board_set_parameter(std::string_view /*plugin*/, int /*part*/, std::uint64_t, std::array<float, 3>, bool /*colour*/) {
+    virtual std::string board_set_parameter(std::string_view /*plugin*/, int /*part*/, std::uint64_t, std::array<float, 3>, bool /*colour*/, bool /*preview*/ = false) {
         return unavailable;
     }
     // Part -1: every part; no key: every key.
-    virtual void board_clear_parameter(std::string_view /*plugin*/, int /*part*/, std::optional<std::uint64_t>) {}
+    virtual void board_clear_parameter(std::string_view /*plugin*/, int /*part*/, std::optional<std::uint64_t>, bool /*preview*/ = false) {}
     // ---- variants: of the plugin's own mod (Engine/Vfs/mod_list.h Variants) -----------------------------
     struct VariantState {
         std::vector<std::string> installed; // its "order" first
@@ -1038,8 +1094,10 @@ public:
     };
     // Empty when the mod declares no variants.
     virtual std::optional<VariantState> variants(std::string_view /*plugin*/, const std::filesystem::path& /*package*/) { return std::nullopt; }
-    // The variant saved as the mod's choice, the mods applied again and the level loaded again with it.
-    virtual std::string choose_variant(std::string_view /*plugin*/, const std::filesystem::path& /*package*/, std::string_view /*variant*/) {
+    // The variant saved as the mod's choice, and (now) the mods applied again and the level loaded
+    // again with it; without now, it only waits for the next launch.
+    virtual std::string choose_variant(std::string_view /*plugin*/, const std::filesystem::path& /*package*/, std::string_view /*variant*/,
+                                       bool /*now*/ = true) {
         return unavailable;
     }
     // ---- the skater's physics -----------------------------------------------------------------------
@@ -1088,6 +1146,9 @@ public:
     struct ScreenLook {
         float bend{}, fov{60}, age{};
         bool bars{}, hood{}, grade{}, soft{}, scanlines{}, grain{}, dropouts{}, head_switching{}, tracking{}, smear{}, iris{};
+        // How strongly each of these is drawn while on, 0..1 (strengths = {grade = 0.6, ...}; 1 when not given).
+        float bars_strength{1}, hood_strength{1}, grade_strength{1}, soft_strength{1}, scanlines_strength{1}, grain_strength{1},
+            dropouts_strength{1}, head_switching_strength{1}, smear_strength{1};
         double rolling{-1};
         std::array<std::string, 5> text;
     };
