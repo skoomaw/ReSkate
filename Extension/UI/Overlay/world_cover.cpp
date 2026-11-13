@@ -51,7 +51,7 @@ constexpr std::size_t camera_candidates = 1;
 // trails) swam as the camera moved; with the frame before's, less; with two before's, hardly (tried in
 // the game, 2026-11-13).
 constexpr std::size_t camera_delay = 2;
-constexpr std::size_t camera_history = camera_delay + 1; // the cameras kept, newest first
+constexpr std::size_t camera_history = 6; // the cameras kept, newest first (TEST: up to 4 frames back, blended)
 constexpr std::size_t camera_floats = 12; // right, up, back, eye
 // Trails through the cover (add_trail): at most this many points kept (world_cover.hlsl's MOST_TRAIL).
 constexpr std::size_t most_trail = 256;
@@ -937,8 +937,29 @@ bool record_cover(Shared& s) {
         s.cameras_known = std::min(s.cameras_known + 1, camera_history);
     }
     // The camera the picture was drawn with (camera_delay): the oldest kept, until there are enough.
-    const std::size_t delay = std::min(camera_delay, s.cameras_known - 1);
-    const auto& camera = s.cameras[delay];
+    std::size_t delay = std::min(camera_delay, s.cameras_known - 1);
+    std::array<float, camera_floats> blended = s.cameras[delay];
+    {
+        // TEST: a plugin's own delay, between two frames' cameras blended (axes made unit again).
+        auto& a = asked();
+        std::lock_guard lock(a.mutex);
+        const float wanted = a.settings.camera_delay;
+        if (wanted >= 0 && s.cameras_known > 1) {
+            const float most = static_cast<float>(s.cameras_known - 1);
+            const float at = std::min(wanted, most);
+            const auto newer = static_cast<std::size_t>(std::floor(at));
+            const auto older = std::min(newer + 1, s.cameras_known - 1);
+            const float t = at - static_cast<float>(newer);
+            for (std::size_t k = 0; k < camera_floats; ++k) blended[k] = s.cameras[newer][k] + (s.cameras[older][k] - s.cameras[newer][k]) * t;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                float* const v = blended.data() + axis * 3;
+                const float n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                if (n > 1e-6f) v[0] /= n, v[1] /= n, v[2] /= n;
+            }
+            delay = newer;
+        }
+    }
+    const auto& camera = blended;
 
     Settings settings;
     std::vector<Clear> clear;
@@ -972,7 +993,7 @@ bool record_cover(Shared& s) {
     {
         auto* const out = reinterpret_cast<float*>(s.camera_cpu + at * camera_slice);
         for (std::size_t c = 0; c < camera_candidates; ++c) {
-            const auto& from = s.cameras[std::min(c + delay, s.cameras_known - 1)];
+            const auto& from = c == 0 ? camera : s.cameras[std::min(c + delay, s.cameras_known - 1)];
             float* const to = out + c * 4 * 4;
             for (std::size_t v = 0; v < 4; ++v) {
                 to[v * 4] = from[v * 3], to[v * 4 + 1] = from[v * 3 + 1], to[v * 4 + 2] = from[v * 3 + 2], to[v * 4 + 3] = 0;
