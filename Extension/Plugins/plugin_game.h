@@ -335,6 +335,7 @@ public:
         float left{1}; // how much of it is left (melting), 0..1, the same everywhere
         bool snowfall_stopping{}; // the snow stops falling: no new flakes, the last ones fall out
         float camera_delay{-1}; // TEST: world_cover.h
+        float camera_delay_ms{-1}; // TEST: world_cover.h
     };
     virtual std::string world_cover(std::string_view /*plugin*/, std::optional<WorldCover>) { return unavailable; }
     // The time of day forced on the map now (morning, noon, afternoon, evening, night, weatherday,

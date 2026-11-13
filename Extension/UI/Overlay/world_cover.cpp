@@ -51,7 +51,7 @@ constexpr std::size_t camera_candidates = 1;
 // trails) swam as the camera moved; with the frame before's, less; with two before's, hardly (tried in
 // the game, 2026-11-13).
 constexpr std::size_t camera_delay = 2;
-constexpr std::size_t camera_history = 6; // the cameras kept, newest first (TEST: up to 4 frames back, blended)
+constexpr std::size_t camera_history = 32; // the cameras kept, newest first (TEST: up to 60 ms back, blended)
 constexpr std::size_t camera_floats = 12; // right, up, back, eye
 // Trails through the cover (add_trail): at most this many points kept (world_cover.hlsl's MOST_TRAIL).
 constexpr std::size_t most_trail = 256;
@@ -200,6 +200,7 @@ struct Shared {
     bool relearning{}; // a new camera: the next middle measured is taken, up or down
     // The cameras of this and the last two frames, newest first, and how many are known.
     std::array<std::array<float, camera_floats>, camera_history> cameras{};
+    std::array<double, camera_history> camera_times{}; // when each was read, in milliseconds (TEST)
     std::size_t cameras_known{};
     // The near distance each recent frame measured, and the steady middle of them (0: none yet).
     std::deque<float> nears;
@@ -932,8 +933,12 @@ bool record_cover(Shared& s) {
     // This frame's camera, newest first (the measurements try the first camera_candidates of them).
     {
         const auto& m = projector->m;
-        for (std::size_t c = camera_history - 1; c > 0; --c) s.cameras[c] = s.cameras[c - 1];
+        for (std::size_t c = camera_history - 1; c > 0; --c) s.cameras[c] = s.cameras[c - 1], s.camera_times[c] = s.camera_times[c - 1];
         s.cameras[0] = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10], m[12], m[13], m[14]};
+        LARGE_INTEGER counter{}, frequency{};
+        QueryPerformanceCounter(&counter);
+        QueryPerformanceFrequency(&frequency);
+        s.camera_times[0] = static_cast<double>(counter.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart);
         s.cameras_known = std::min(s.cameras_known + 1, camera_history);
     }
     // The camera the picture was drawn with (camera_delay): the oldest kept, until there are enough.
@@ -944,7 +949,23 @@ bool record_cover(Shared& s) {
         auto& a = asked();
         std::lock_guard lock(a.mutex);
         const float asked_delay = a.settings.camera_delay;
-        if (asked_delay >= 0 && s.cameras_known > 1) {
+        const float asked_ms = a.settings.camera_delay_ms;
+        if (asked_ms >= 0 && s.cameras_known > 1) {
+            // The camera as it was that many milliseconds ago, between the two read either side of then.
+            const double then = s.camera_times[0] - asked_ms;
+            std::size_t older = 1;
+            while (older + 1 < s.cameras_known && s.camera_times[older] > then) ++older;
+            const std::size_t newer = older - 1;
+            const double span = s.camera_times[newer] - s.camera_times[older];
+            const float t = span > 1e-6 ? static_cast<float>(std::clamp((s.camera_times[newer] - then) / span, 0.0, 1.0)) : 0.0f;
+            for (std::size_t k = 0; k < camera_floats; ++k) blended[k] = s.cameras[newer][k] + (s.cameras[older][k] - s.cameras[newer][k]) * t;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                float* const v = blended.data() + axis * 3;
+                const float n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                if (n > 1e-6f) v[0] /= n, v[1] /= n, v[2] /= n;
+            }
+            delay = newer;
+        } else if (asked_delay >= 0 && s.cameras_known > 1) {
             const float most = static_cast<float>(s.cameras_known - 1);
             const float frames_back = std::min(asked_delay, most);
             const auto newer = static_cast<std::size_t>(std::floor(frames_back));

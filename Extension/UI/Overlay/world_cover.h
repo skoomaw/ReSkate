@@ -48,6 +48,8 @@ struct Settings {
     // TEST (2026-11-13): the camera of how many frames before (1..4, between two blended) the world is
     // found with; below 0, the built-in camera_delay.
     float camera_delay{-1};
+    // TEST: the camera of how many milliseconds before (0..60, between two blended); below 0, camera_delay.
+    float camera_delay_ms{-1};
 };
 
 // A place kept clear of the cover: an upright cylinder `radius` wide standing on `foot` (the world),
