@@ -935,7 +935,8 @@ void STDMETHODCALLTYPE hooked_compute_cbv(ID3D12GraphicsCommandList* list, UINT 
 // `camera` has it. Its buffer is read through the GPU memory watch (gpu_diagnostics.h); false when none.
 bool game_camera(Shared& s, std::array<float, camera_floats>& camera) {
     const auto end = bound_count.load();
-    const auto begin = std::max(s.bound_seen, end > bound_kept ? end - bound_kept : std::uint64_t{0});
+    constexpr std::uint64_t looked_most = 16; // the newest binds since the last frame, at most
+    const auto begin = std::max(s.bound_seen, end > looked_most ? end - looked_most : std::uint64_t{0});
     s.bound_seen = end;
     std::array<float, 20> f{};
     for (auto n = end; n > begin; --n) {

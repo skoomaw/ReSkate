@@ -290,6 +290,10 @@ struct Memory {
     std::shared_mutex ranges_mutex;
     std::map<std::uint64_t, std::pair<std::uint64_t, void*>> ranges;
     std::atomic<std::uint64_t> generation{};
+    // Every buffer with its own GPU address, committed or placed (under `mutex`): GPU address -> bytes, object.
+    // read_gpu_buffer finds one in it at once; through the heaps' ranges it went over every resource, and the
+    // camera's read each frame stalled the game (2026-11-13).
+    std::map<std::uint64_t, std::pair<std::uint64_t, void*>> buffers;
 };
 Memory& gpu_memory() { static auto* value = new Memory; return *value; }
 
@@ -333,6 +337,8 @@ void note_release(IUnknown* object) noexcept {
         const auto found = m.live.find(object);
         if (found == m.live.end()) return;
         remove_range(found->second);
+        if (const auto buffer = m.buffers.find(found->second.gpu); buffer != m.buffers.end() && buffer->second.second == object)
+            m.buffers.erase(buffer);
         auto& slot = m.freed[m.freed_count++ % freed_kept];
         slot = found->second;
         slot.freed = frames;
@@ -408,6 +414,7 @@ void note_resource(void** out, void* heap, std::uint64_t offset) noexcept {
             }
         }
         if (!heap) add_range(made);
+        if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && made.gpu && made.bytes) m.buffers[made.gpu] = {made.bytes, object};
         m.live[object] = made;
         ++m.made_count;
     } catch (...) {}
@@ -1020,49 +1027,60 @@ void watch_gpu_memory() noexcept {
 
 void watch_constants(ConstantsWatcher watcher) noexcept { constants_watcher.store(watcher); }
 
+namespace {
+// Buffers read_gpu_buffer has opened, kept open (and held) so that each later read is a copy, with no lock the
+// game also takes: the game's upload rings, a few of them. And the starts of buffers it could not map.
+struct Opened {
+    std::uint64_t start{}, length{};
+    ComPtr<ID3D12Resource> resource;
+    const char* cpu{};
+};
+constexpr std::size_t opened_most = 32;
+std::mutex opened_mutex;
+std::vector<Opened> opened;
+std::vector<std::uint64_t> unmappable;
+}
+
 std::size_t read_gpu_buffer(std::uint64_t address, void* out, std::size_t bytes, std::uint64_t* buffer_start,
                             std::uint64_t* buffer_length) noexcept {
     try {
-        auto& m = gpu_memory();
-        std::lock_guard lock(m.mutex); // a resource is not freed while this is held (its release is noted under it)
-        std::uint64_t start{}, length{};
-        void* object{};
+        const auto copy = [&](const Opened& o) {
+            const auto offset = address - o.start;
+            const auto n = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, o.length - offset));
+            std::memcpy(out, o.cpu + offset, n);
+            if (buffer_start) *buffer_start = o.start;
+            if (buffer_length) *buffer_length = o.length;
+            return n;
+        };
+        std::lock_guard open_lock(opened_mutex);
+        for (const auto& o : opened)
+            if (address >= o.start && address - o.start < o.length) return copy(o);
+        // Not open yet: the buffer holding the address, from the memory watch.
+        Opened o;
         {
-            std::shared_lock ranges(m.ranges_mutex);
-            auto at = m.ranges.upper_bound(address);
-            if (at == m.ranges.begin()) return 0;
+            auto& m = gpu_memory();
+            std::lock_guard lock(m.mutex);
+            auto at = m.buffers.upper_bound(address);
+            if (at == m.buffers.begin()) return 0;
             --at;
-            start = at->first, length = at->second.first, object = at->second.second;
+            if (address - at->first >= at->second.first) return 0;
+            o.start = at->first, o.length = at->second.first;
+            if (std::find(unmappable.begin(), unmappable.end(), o.start) != unmappable.end()) return 0;
+            if (FAILED(static_cast<IUnknown*>(at->second.second)->QueryInterface(IID_PPV_ARGS(&o.resource))) || !o.resource) return 0;
         }
-        if (address - start >= length) return 0;
-        const auto found = m.live.find(object);
-        if (found == m.live.end()) return 0;
-        // A heap's range: the buffer placed in it that covers the address.
-        ID3D12Resource* resource{};
-        std::uint64_t resource_start = start, resource_bytes = length;
-        if (found->second.heap) {
-            for (const auto& [placed, a] : m.live) {
-                if (a.heap || a.in_heap != object || a.dimension != D3D12_RESOURCE_DIMENSION_BUFFER) continue;
-                if (address - start >= a.offset && address - start - a.offset < a.bytes) {
-                    resource = static_cast<ID3D12Resource*>(placed);
-                    resource_start = start + a.offset, resource_bytes = a.bytes;
-                    break;
-                }
-            }
-        } else if (found->second.dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
-            resource = static_cast<ID3D12Resource*>(object);
-        }
-        if (!resource) return 0;
         void* cpu{};
-        if (FAILED(resource->Map(0, nullptr, &cpu)) || !cpu) return 0; // (only a CPU-visible heap maps)
-        const auto offset = address - resource_start;
-        const auto n = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, resource_bytes - offset));
-        if (buffer_start) *buffer_start = resource_start;
-        if (buffer_length) *buffer_length = resource_bytes;
-        std::memcpy(out, static_cast<const char*>(cpu) + offset, n);
-        const D3D12_RANGE written{0, 0};
-        resource->Unmap(0, &written);
-        return n;
+        if (FAILED(o.resource->Map(0, nullptr, &cpu)) || !cpu) { // (only a CPU-visible heap maps)
+            if (unmappable.size() < 4096) unmappable.push_back(o.start);
+            return 0;
+        }
+        o.cpu = static_cast<const char*>(cpu);
+        if (opened.size() >= opened_most) {
+            const D3D12_RANGE written{0, 0};
+            opened.front().resource->Unmap(0, &written);
+            opened.erase(opened.begin());
+        }
+        opened.push_back(std::move(o));
+        return copy(opened.back());
     } catch (...) {
         return 0;
     }
