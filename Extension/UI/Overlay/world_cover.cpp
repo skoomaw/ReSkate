@@ -93,6 +93,7 @@ struct Asked {
     struct TrailPoint {
         std::array<float, 3> at{};
         float width{}, fade{};
+        float tread{}; // the width of a tread pressed into it (its lines), or 0
         std::uint64_t when{};
     };
     std::deque<TrailPoint> trail;
@@ -959,7 +960,7 @@ bool record_cover(Shared& s) {
             const float strength = 1.0f - static_cast<float>(now - t.when) / (t.fade * 1000.0f);
             float* const point = head + 8 + count * 8;
             point[0] = t.at[0], point[1] = t.at[1], point[2] = t.at[2], point[3] = t.width;
-            point[4] = std::clamp(strength, 0.0f, 1.0f), point[5] = point[6] = point[7] = 0;
+            point[4] = std::clamp(strength, 0.0f, 1.0f), point[5] = t.tread, point[6] = point[7] = 0;
             box = {std::min(box[0], t.at[0]), std::min(box[1], t.at[2]), std::max(box[2], t.at[0]), std::max(box[3], t.at[2]),
                    std::min(box[4], t.at[1]), std::max(box[5], t.at[1])};
             ++count;
@@ -1139,7 +1140,7 @@ void set(const Settings& settings) noexcept {
     wanted.store(true);
 }
 void clear() noexcept { wanted.store(false); }
-void add_trail(const std::array<float, 3>& at, float width, float fade) noexcept {
+void add_trail(const std::array<float, 3>& at, float width, float fade, float tread) noexcept {
     try {
         auto& a = asked();
         std::lock_guard lock(a.mutex);
@@ -1148,7 +1149,7 @@ void add_trail(const std::array<float, 3>& at, float width, float fade) noexcept
             const float dx = at[0] - last[0], dy = at[1] - last[1], dz = at[2] - last[2];
             if (dx * dx + dy * dy + dz * dz < 0.05f * 0.05f) return;
         }
-        a.trail.push_back({at, width, fade, GetTickCount64()});
+        a.trail.push_back({at, width, fade, tread, GetTickCount64()});
         while (a.trail.size() > most_trail) a.trail.pop_front();
     } catch (...) {}
 }

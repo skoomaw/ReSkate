@@ -359,6 +359,7 @@ public:
     struct CoverTrail {
         Vec3 at{};
         float width{0.25f}, fade{10};
+        float tread{}; // a tread's width pressed into it (its lines), or 0
     };
     virtual std::string world_cover_trail(std::string_view /*plugin*/, const CoverTrail&) { return unavailable; }
 
