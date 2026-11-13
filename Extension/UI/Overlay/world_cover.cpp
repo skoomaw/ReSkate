@@ -59,7 +59,8 @@ constexpr std::size_t most_trail = 256;
 // The shaders' buffer (world_cover.hlsl's t3), one part of the upload buffer per command allocator: the
 // cameras (four float4s each), then a float4 a place kept clear (how much snow shows on what stands in
 // it), then the trails (two float4s of head, then two a point).
-constexpr UINT64 camera_slice = ((camera_candidates * 4 + most_clear + 2 + most_trail * 2) * 16 + 255) / 256 * 256;
+constexpr std::size_t place_floats4 = 3; // a place kept clear: its snow; a board's forward and half length; its up and half width
+constexpr UINT64 camera_slice = ((camera_candidates * 4 + most_clear * place_floats4 + 2 + most_trail * 2) * 16 + 255) / 256 * 256;
 // The measurements: one row a candidate camera, a column a point (ps_measure), read back by the CPU.
 constexpr UINT measure_columns = 32;
 constexpr UINT measure_pitch = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
@@ -964,7 +965,7 @@ bool record_cover(Shared& s) {
         // The trails, after the cameras and the places: a head (how many points, the box they lie in),
         // then each point (where, width; how strong it still is, fading to nothing over its time).
         std::erase_if(a.trail, [&](const auto& t) { return now - t.when > static_cast<std::uint64_t>(t.fade * 1000); });
-        float* const head = reinterpret_cast<float*>(s.camera_cpu + at * camera_slice) + (camera_candidates * 4 + most_clear) * 4;
+        float* const head = reinterpret_cast<float*>(s.camera_cpu + at * camera_slice) + (camera_candidates * 4 + most_clear * place_floats4) * 4;
         std::size_t count = 0;
         std::array<float, 6> box{1e30f, 1e30f, -1e30f, -1e30f, 1e30f, -1e30f}; // min x, min z, max x, max z, min y, max y
         for (const auto& t : a.trail) {
@@ -989,11 +990,19 @@ bool record_cover(Shared& s) {
                 to[v * 4] = from[v * 3], to[v * 4 + 1] = from[v * 3 + 1], to[v * 4 + 2] = from[v * 3 + 2], to[v * 4 + 3] = 0;
             }
         }
-        // Each place kept clear: how much snow shows on what stands in it (0: none).
+        // Each place kept clear: how much snow shows in it (0: none); then a board-shaped one's forward and
+        // half its length, its up and half its width (0: an upright cylinder).
         float* const places = out + camera_candidates * 4 * 4;
         for (std::size_t c = 0; c < most_clear; ++c) {
-            places[c * 4] = c < clear.size() ? clear[c].snow : 0;
-            places[c * 4 + 1] = places[c * 4 + 2] = places[c * 4 + 3] = 0;
+            float* const to = places + c * place_floats4 * 4;
+            std::fill(to, to + place_floats4 * 4, 0.0f);
+            if (c >= clear.size()) continue;
+            to[0] = clear[c].snow;
+            if (clear[c].length > 0) {
+                for (std::size_t k = 0; k < 3; ++k) to[4 + k] = clear[c].forward[k], to[8 + k] = clear[c].up[k];
+                to[7] = clear[c].length * 0.5f;
+                to[11] = clear[c].radius;
+            }
         }
     }
     // Views: the picture's copy as the target's format reads it, and the game's depth as it is.

@@ -24,11 +24,12 @@ Texture2D<float> depth : register(t1);
 // The cameras ps_measure tries (world_cover.cpp's camera_candidates): each its right, up, back and eye.
 StructuredBuffer<float4> cameras : register(t3);
 #define CANDIDATES 1
-// After the cameras: a float4 a place kept clear (x: how much snow shows on what stands in it), then the
-// trails: [0] = (points, the box they lie in: min x, min z, max x), [1] = (max z, min y, max y, -), then two
-// a point, oldest first: (where, width), (how strong it still is, 0 to 1, -, -, -).
+// After the cameras: three float4s a place kept clear: (how much snow shows in it, -, -, -), then a
+// board-shaped one's (forward, half its length) and (up, half its width), w 0 for an upright cylinder.
+// Then the trails: [0] = (points, the box they lie in: min x, min z, max x), [1] = (max z, min y, max y,
+// -), then two a point, oldest first: (where, width), (how strong it still is, 0 to 1, its tread's width, -).
 #define PLACES (CANDIDATES * 4)
-#define TRAIL (PLACES + 3)
+#define TRAIL (PLACES + 9)
 #define MOST_TRAIL 256
 
 struct Vertex { float4 position : SV_Position; };
@@ -378,7 +379,8 @@ Output ps_main(Vertex input) {
     // Distances are only real when measured: the trails and the places kept clear need them.
     float pressed = 0, shade = 1;
     bool dusted = false; // a place kept clear shows some snow on what stands in it
-    [unroll] for (int k = 0; k < 3; ++k) dusted = dusted || (k < (int)clear_info.x && cameras[PLACES + k].x > 0);
+    [unroll] for (int k = 0; k < 3; ++k) dusted = dusted || (k < (int)clear_info.x && cameras[PLACES + k * 3].x > 0);
+    const float untrailed = cover; // before any trail pressed it (a board-shaped place has none)
     if (near_measured > 0 && cover > 0.002) {
         // Trails: where a board went or a skater rolled, the snow packed down, thinner and greyer, filling
         // back in as the trail fades.
@@ -396,6 +398,22 @@ Output ps_main(Vertex input) {
             const float3 from = here - clears[c].xyz;
             const float radius = clears[c].w;
             const float height = c == 0 ? clear_info.y : c == 1 ? clear_info.z : clear_info.w;
+            const float snow = cameras[PLACES + c * 3].x;
+            // A board-shaped place (a deck riding low, which the cylinder's ground test takes for the
+            // ground): in its own plane and outline, rounded at its ends, the cover is `snow` of what it would
+            // be and no trail is pressed into it. A trail under the deck showed on its griptape (2026-11-13).
+            const float4 axis = cameras[PLACES + c * 3 + 1], side_axis = cameras[PLACES + c * 3 + 2];
+            if (axis.w > 0) {
+                const float along = dot(from, axis.xyz), up = dot(from, side_axis.xyz);
+                const float across = length(from - axis.xyz * along - side_axis.xyz * up);
+                const float straight = max(axis.w - side_axis.w, 0);
+                const float edge = length(float2(along - clamp(along, -straight, straight), across));
+                const float in_board = (1 - smoothstep(side_axis.w - 0.01, side_axis.w, edge)) *
+                                       (1 - smoothstep(height * 0.5 - 0.005, height * 0.5, abs(up)));
+                pressed *= 1 - in_board;
+                cover = lerp(cover, untrailed * snow, in_board);
+                continue;
+            }
             const float inside = 1 - smoothstep(radius * 0.75, radius, length(from.xz));
             if (inside <= 0 || from.y < -0.5 || from.y > height) continue;
             float ground = here.y, ring = 0;
@@ -420,7 +438,6 @@ Output ps_main(Vertex input) {
             const float on_it = max(smoothstep(0, 0.004, over), smoothstep(0.55, 0.65, from.y) * body);
             // What stands in it has a patchy dusting of snow, on every side, where the plugin asks for some
             // (the skater after rolling in it); the pattern goes with the place, so it moves with them.
-            const float snow = cameras[PLACES + c].x;
             const float dust = snow > 0 ? snow * smoothstep(0.35, 0.75, noise(from.xz * 14.0 + from.y * 9.0)) : 0;
             cover = lerp(cover, dust, inside * on_it);
         }

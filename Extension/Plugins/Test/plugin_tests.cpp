@@ -337,6 +337,8 @@ struct FakeGame final : Game {
         for (const auto& p : places) {
             line += std::format(" ({:.1f} {:.1f} {:.1f} r{:.2f} h{:.1f}", p.foot[0], p.foot[1], p.foot[2], p.radius, p.height);
             if (p.snow > 0) line += std::format(" s{:.2f}", p.snow);
+            if (p.length > 0)
+                line += std::format(" l{:.2f} f{:.1f},{:.1f},{:.1f} u{:.1f},{:.1f},{:.1f}", p.length, p.forward[0], p.forward[1], p.forward[2], p.up[0], p.up[1], p.up[2]);
             line += ")";
         }
         calls.push_back(line);
@@ -4824,6 +4826,10 @@ void plugins_cover_the_world() {
         assert(not pcall(reskate.effects.keep_clear, {{position = vector.create(0, 0, 0), radius = 20}}), "a radius is 0.05 to 10")
         assert(not pcall(reskate.effects.keep_clear, {{radius = 1}}), "a place has a position")
         assert(reskate.effects.keep_clear({{position = vector.create(7, 0, 7), snow = 0.4}}), "snow on what stands in a place")
+        assert(reskate.effects.keep_clear({{position = vector.create(1, 2, 3)}, {position = vector.create(0, 0, 0), length = 0.8,
+            radius = 0.1, height = 0.05, snow = 0.3, forward = vector.create(2, 1, 0)}}), "a board-shaped place")
+        assert(not pcall(reskate.effects.keep_clear, {{position = vector.create(0, 0, 0), length = 0.8, forward = vector.create(0, 3, 0)}}),
+            "a board's forward is not its up")
         assert(not pcall(reskate.effects.keep_clear, {{position = vector.create(0, 0, 0), snow = 2}}), "a place's snow is 0 to 1")
         assert(reskate.effects.trail({position = vector.create(1, 0, 2)}))
         assert(reskate.effects.trail({position = vector.create(1, 0, 3), width = 0.3, fade = 12}))
@@ -4847,6 +4853,8 @@ void plugins_cover_the_world() {
     check(game.called("keep clear snow 2 (1.0 2.0 3.0 r0.60 h2.0) (4.0 5.0 6.0 r1.50 h3.0)") && game.called("keep clear snow 0"),
           "Places kept clear of the cover, with their defaults, and none\n" + environment.all());
     check(game.called("keep clear snow 1 (7.0 0.0 7.0 r0.60 h2.0 s0.40)"), "Snow on what stands in a place\n" + environment.all());
+    check(game.called("keep clear snow 2 (1.0 2.0 3.0 r0.60 h2.0) (0.0 0.0 0.0 r0.10 h0.1 s0.30 l0.80 f1.0,0.0,0.0 u0.0,1.0,0.0)"),
+          "A board-shaped place, its forward made square to its up\n" + environment.all());
     check(game.called("trail snow 1.0 0.0 2.0 w0.25 f10.0") && game.called("trail snow 1.0 0.0 3.0 w0.30 f12.0") &&
               game.called("trail snow 1.0 0.0 4.0 w0.25 f10.0 t0.22"),
           "Trail points, with their defaults\n" + environment.all());

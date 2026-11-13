@@ -56,6 +56,12 @@ struct Clear {
     // How much cover shows on what stands in it (the skater after rolling in snow), 0 to 1: a patchy
     // dusting on every side. 0: none, as before.
     float snow{};
+    // A board-shaped place (length > 0): `foot` its middle, `forward` and `up` its own axes (unit, square to
+    // each other), `radius` its half width, `height` its thickness. In it, in its own plane, the cover is
+    // `snow` of what it would be and no trail is pressed into it: a deck riding low, which the upright
+    // place round the skater takes for the ground.
+    float length{};
+    std::array<float, 3> forward{0, 0, 1}, up{0, 1, 0};
 };
 
 // Client thread. On until clear().
