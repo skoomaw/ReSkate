@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -713,8 +714,12 @@ std::array<std::atomic<RootView>, 6> original_root_views{};
 std::atomic<SetIndexBuffer> original_index_buffer{};
 std::atomic<SetVertexBuffers> original_vertex_buffers{};
 std::atomic<BuildAccelerationStructure> original_build{};
+std::atomic<dingosdk::overlay::ConstantsWatcher> constants_watcher{};
 template<std::size_t N> void STDMETHODCALLTYPE hooked_root_view(ID3D12GraphicsCommandList* list, UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) {
     check_address(root_view_names[N], address, _ReturnAddress());
+    if constexpr (N <= 1) {
+        if (const auto watcher = constants_watcher.load(std::memory_order_relaxed)) watcher(static_cast<int>(N), index, address);
+    }
     original_root_views[N].load(std::memory_order_relaxed)(list, index, address);
 }
 constexpr RootView root_view_forwarders[6]{&hooked_root_view<0>, &hooked_root_view<1>, &hooked_root_view<2>, &hooked_root_view<3>,
@@ -902,6 +907,9 @@ HRESULT STDMETHODCALLTYPE hooked_descriptor_heap(ID3D12Device* device, const D3D
 }
 void STDMETHODCALLTYPE hooked_cbv(ID3D12Device* device, const D3D12_CONSTANT_BUFFER_VIEW_DESC* desc, D3D12_CPU_DESCRIPTOR_HANDLE handle) {
     if (desc) check_address("CreateConstantBufferView", desc->BufferLocation, _ReturnAddress());
+    if (desc) {
+        if (const auto watcher = constants_watcher.load(std::memory_order_relaxed)) watcher(2, 0, desc->BufferLocation);
+    }
     note_descriptors(handle.ptr, 1);
     original_cbv.load(std::memory_order_relaxed)(device, desc, handle);
 }
@@ -998,6 +1006,53 @@ void watch_gpu_memory() noexcept {
     original_create_device.store(reinterpret_cast<CreateDevice>(trampoline));
     hook_enable(create);
     SetLastError(error);
+}
+
+void watch_constants(ConstantsWatcher watcher) noexcept { constants_watcher.store(watcher); }
+
+std::size_t read_gpu_buffer(std::uint64_t address, void* out, std::size_t bytes) noexcept {
+    try {
+        auto& m = gpu_memory();
+        std::lock_guard lock(m.mutex); // a resource is not freed while this is held (its release is noted under it)
+        std::uint64_t start{}, length{};
+        void* object{};
+        {
+            std::shared_lock ranges(m.ranges_mutex);
+            auto at = m.ranges.upper_bound(address);
+            if (at == m.ranges.begin()) return 0;
+            --at;
+            start = at->first, length = at->second.first, object = at->second.second;
+        }
+        if (address - start >= length) return 0;
+        const auto found = m.live.find(object);
+        if (found == m.live.end()) return 0;
+        // A heap's range: the buffer placed in it that covers the address.
+        ID3D12Resource* resource{};
+        std::uint64_t resource_start = start, resource_bytes = length;
+        if (found->second.heap) {
+            for (const auto& [placed, a] : m.live) {
+                if (a.heap || a.in_heap != object || a.dimension != D3D12_RESOURCE_DIMENSION_BUFFER) continue;
+                if (address - start >= a.offset && address - start - a.offset < a.bytes) {
+                    resource = static_cast<ID3D12Resource*>(placed);
+                    resource_start = start + a.offset, resource_bytes = a.bytes;
+                    break;
+                }
+            }
+        } else if (found->second.dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+            resource = static_cast<ID3D12Resource*>(object);
+        }
+        if (!resource) return 0;
+        void* cpu{};
+        if (FAILED(resource->Map(0, nullptr, &cpu)) || !cpu) return 0; // (only a CPU-visible heap maps)
+        const auto offset = address - resource_start;
+        const auto n = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, resource_bytes - offset));
+        std::memcpy(out, static_cast<const char*>(cpu) + offset, n);
+        const D3D12_RANGE written{0, 0};
+        resource->Unmap(0, &written);
+        return n;
+    } catch (...) {
+        return 0;
+    }
 }
 
 void describe_gpu_address(std::uint64_t address) noexcept {

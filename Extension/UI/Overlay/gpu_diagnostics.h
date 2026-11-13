@@ -39,6 +39,14 @@ void describe_gpu_address(std::uint64_t address) noexcept;
 // builds a ray-tracing structure from is checked against the memory that exists. One in nothing
 // is said in the log once per calling code, with what was there before.
 void watch_addresses(ID3D12GraphicsCommandList* list) noexcept;
+// Research (the camera-research branch, not for merging): while a watcher is set, each constant buffer the
+// game binds is told to it: `kind` 0 a compute root view, 1 a graphics root view, 2 a descriptor
+// (CreateConstantBufferView, `index` 0). Needs the GPU memory watch (RESKATE_GPU_DIAGNOSTICS). Any thread.
+using ConstantsWatcher = void (*)(int kind, unsigned index, std::uint64_t address) noexcept;
+void watch_constants(ConstantsWatcher watcher) noexcept;
+// Research: copies up to `bytes` bytes from a GPU address in a CPU-visible buffer the GPU memory watch
+// knows (an upload buffer, mapped for the read) into `out`. How many were copied (0: not one it can read).
+std::size_t read_gpu_buffer(std::uint64_t address, void* out, std::size_t bytes) noexcept;
 // The graphics card the game renders on and its driver's version: said in the log once, and kept
 // for crash reports' tags (crash_report::set_gpu). Always on.
 void record_gpu_identity(ID3D12Device* device) noexcept;

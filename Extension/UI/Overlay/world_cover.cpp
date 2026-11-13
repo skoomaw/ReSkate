@@ -4,6 +4,7 @@
 #include "Engine/Core/Hooks/patches.h"
 #include "Engine/Core/Log/logging.h"
 #include "Extension/Plugins/plugin_camera.h"
+#include "Extension/UI/Overlay/gpu_diagnostics.h"
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -15,6 +16,7 @@
 #include <mutex>
 #include <map>
 #include <set>
+#include <tuple>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -1295,6 +1297,129 @@ void install(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12GraphicsComm
     else logging::write(logging::Level::info, logging::Channel::graphics, "World cover: hooks installed.");
 }
 
+// ---- Research (the camera-research branch, not for merging) ----------------------------------------
+// Looking for the camera the game draws each frame with, in its constant buffers: every three seconds, one
+// frame's constant buffers (with the launcher's GPU diagnostics on, which knows the game's GPU memory) are
+// read and searched for the camera's axes, as the rows or the columns of a matrix, against the cameras of
+// the last frames and the one now. What matches, and which camera it matches best, is said in the log.
+namespace camera_search {
+struct Bound {
+    int kind{};          // 0 compute root view, 1 graphics root view, 2 descriptor
+    unsigned index{};    // root parameter
+    std::uint64_t address{};
+};
+std::mutex bound_mutex;
+std::vector<Bound> bound;
+std::atomic<bool> taking{};
+void take(int kind, unsigned index, std::uint64_t address) noexcept {
+    if (!taking.load(std::memory_order_relaxed)) return;
+    try {
+        std::lock_guard lock(bound_mutex);
+        if (bound.size() < 30000) bound.push_back({kind, index, address});
+    } catch (...) {}
+}
+using Camera = std::array<float, camera_floats>; // right, up, back, eye
+// How far three floats (each `stride` apart) are from an axis, either way round (a forward is a back the
+// other way): the largest difference.
+float axis_error(const float* f, std::size_t stride, const float* axis) {
+    float same = 0, flipped = 0;
+    for (std::size_t c = 0; c < 3; ++c) {
+        same = std::max(same, std::abs(f[c * stride] - axis[c]));
+        flipped = std::max(flipped, std::abs(f[c * stride] + axis[c]));
+    }
+    return std::min(same, flipped);
+}
+// A matrix's rotation at `f` against a camera: rows (the axes one after another, 4 floats apart) or columns
+// (each axis down a column: a view matrix, the camera's turn undone).
+float matrix_error(const float* f, bool columns, const Camera& c) {
+    const std::size_t stride = columns ? 4 : 1, apart = columns ? 1 : 4;
+    float worst = 0;
+    for (std::size_t a = 0; a < 3; ++a) worst = std::max(worst, axis_error(f + a * apart, stride, c.data() + a * 3));
+    return worst;
+}
+void search(const std::vector<Bound>& seen, const std::vector<std::pair<std::string, Camera>>& cameras) {
+    std::set<std::tuple<int, unsigned, std::uint64_t>> unique;
+    for (const auto& b : seen) unique.insert({b.kind, b.index, b.address});
+    struct Match {
+        float error{};
+        std::string line;
+    };
+    std::vector<Match> matches;
+    std::size_t readable = 0;
+    std::array<float, 256> f{};
+    for (const auto& [kind, index, address] : unique) {
+        const auto got = overlay::read_gpu_buffer(address, f.data(), sizeof(f)) / sizeof(float);
+        if (!got) continue;
+        ++readable;
+        for (std::size_t i = 0; i + 12 <= got; ++i) {
+            for (const bool columns : {false, true}) {
+                std::vector<float> errors;
+                for (const auto& [name, camera] : cameras) errors.push_back(matrix_error(f.data() + i, columns, camera));
+                const auto best = static_cast<std::size_t>(std::min_element(errors.begin(), errors.end()) - errors.begin());
+                if (errors[best] > 0.02f) continue;
+                std::string line = std::format("{} {} at +{} bytes ({}): {} best ({:.4f}); the others", kind == 0 ? "compute root view" : kind == 1 ? "graphics root view" : "descriptor",
+                                               index, i * 4, columns ? "columns" : "rows", cameras[best].first, errors[best]);
+                for (std::size_t k = 0; k < errors.size(); ++k)
+                    if (k != best) line += std::format(" {} {:.4f}", cameras[k].first, errors[k]);
+                // Where the camera is, as such a matrix keeps it: rows, the fourth row; columns (a view
+                // matrix), each axis against the eye, the other way.
+                const auto& c = cameras[best].second;
+                if (i + 15 <= got && !columns)
+                    line += std::format("; its fourth row {:.2f} {:.2f} {:.2f}, the eye {:.2f} {:.2f} {:.2f}", f[i + 12], f[i + 13], f[i + 14], c[9], c[10], c[11]);
+                if (columns) {
+                    const float tx = -(c[0] * c[9] + c[1] * c[10] + c[2] * c[11]), ty = -(c[3] * c[9] + c[4] * c[10] + c[5] * c[11]),
+                                tz = -(c[6] * c[9] + c[7] * c[10] + c[8] * c[11]);
+                    line += std::format("; its fourth column {:.2f} {:.2f} {:.2f}, the eye undone {:.2f} {:.2f} {:.2f}", f[i + 3], f[i + 7], f[i + 11], tx, ty, tz);
+                }
+                matches.push_back({errors[best], std::move(line)});
+            }
+        }
+    }
+    std::sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) { return a.error < b.error; });
+    logging::printf(logging::Level::info, logging::Channel::graphics,
+                    "Camera search: %zu constant buffers bound in a frame, %zu readable, %zu matrices like the camera.", unique.size(), readable, matches.size());
+    for (std::size_t m = 0; m < matches.size() && m < 16; ++m)
+        logging::write(logging::Level::info, logging::Channel::graphics, "Camera search:   " + matches[m].line);
+}
+// Each frame (present): one frame in every three seconds is taken.
+void step(const std::array<Camera, camera_history>& history, std::size_t known) {
+    static std::uint64_t next_at{};
+    static bool started{};
+    const auto now = GetTickCount64();
+    if (!started) {
+        started = true;
+        overlay::watch_constants(&take);
+        logging::write(logging::Level::info, logging::Channel::graphics,
+                       "Camera search: on (it needs the launcher's GPU diagnostics, which know the game's GPU memory).");
+        next_at = now + 5000;
+    }
+    if (taking.load()) {
+        taking.store(false);
+        std::vector<Bound> seen;
+        {
+            std::lock_guard lock(bound_mutex);
+            seen.swap(bound);
+        }
+        std::vector<std::pair<std::string, Camera>> cameras;
+        for (std::size_t k = 0; k < known; ++k) cameras.push_back({std::format("the camera {} frame(s) back", k), history[k]});
+        if (const auto view = plugin_camera::camera_now()) {
+            const auto& w = view->world;
+            cameras.push_back({"the camera now", Camera{w[0], w[1], w[2], w[4], w[5], w[6], w[8], w[9], w[10], w[12], w[13], w[14]}});
+        }
+        search(seen, cameras);
+        next_at = now + 3000;
+        return;
+    }
+    if (now >= next_at && known == camera_history) {
+        {
+            std::lock_guard lock(bound_mutex);
+            bound.clear();
+        }
+        taking.store(true);
+    }
+}
+}
+
 void present(std::uint32_t width, std::uint32_t height) noexcept {
     try {
         auto& s = shared();
@@ -1331,6 +1456,7 @@ void present(std::uint32_t width, std::uint32_t height) noexcept {
                            "World cover: the world's last drawing was in the frame's last batch, so the cover had no place before post-processing.");
         }
         s.width = width, s.height = height;
+        camera_search::step(s.cameras, s.cameras_known); // research
         s.main_missed = s.main_seen ? 0 : s.main_missed + 1;
         // How this frame went, counted; every 600 frames (the first eight times) said in the log.
         if (s.main_depth) {
