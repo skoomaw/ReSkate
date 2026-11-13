@@ -46,12 +46,13 @@ constexpr UINT views_each = 2;
 // two before as well and drawing with whichever agreed best chose a different one every few seconds
 // (their agreement differed by noise), and every change moved the whole cover by a frame (2026-11-11).
 constexpr std::size_t camera_candidates = 1;
-// The world is found with the camera of two frames before this one: the camera is read as the cover is
-// drawn, and the game is that far ahead of its picture by then. With this frame's, world-fixed things (the
-// trails) swam as the camera moved; with the frame before's, less; with two before's, hardly (tried in
-// the game, 2026-11-13).
-constexpr std::size_t camera_delay = 2;
-constexpr std::size_t camera_history = 32; // the cameras kept, newest first (TEST: up to 60 ms back, blended)
+// The world is found with the camera of 1.15 frames before this one (between the two before, blended): the
+// camera is read as the cover is drawn, and the game is about that far ahead of its picture by then. With
+// this frame's, world-fixed things (the trails) swam as the camera moved. Tried in the game (2026-11-13): two
+// frames before was better than none or one in whole frames, and finer, 1.1 to 1.25 was best; the lag varies
+// a little with the frame rate, so none is perfect.
+constexpr float camera_delay = 1.15f;
+constexpr std::size_t camera_history = 3; // the cameras kept, newest first: enough for camera_delay
 constexpr std::size_t camera_floats = 12; // right, up, back, eye
 // Trails through the cover (add_trail): at most this many points kept (world_cover.hlsl's MOST_TRAIL).
 constexpr std::size_t most_trail = 256;
@@ -200,7 +201,6 @@ struct Shared {
     bool relearning{}; // a new camera: the next middle measured is taken, up or down
     // The cameras of this and the last two frames, newest first, and how many are known.
     std::array<std::array<float, camera_floats>, camera_history> cameras{};
-    std::array<double, camera_history> camera_times{}; // when each was read, in milliseconds (TEST)
     std::size_t cameras_known{};
     // The near distance each recent frame measured, and the steady middle of them (0: none yet).
     std::deque<float> nears;
@@ -933,54 +933,23 @@ bool record_cover(Shared& s) {
     // This frame's camera, newest first (the measurements try the first camera_candidates of them).
     {
         const auto& m = projector->m;
-        for (std::size_t c = camera_history - 1; c > 0; --c) s.cameras[c] = s.cameras[c - 1], s.camera_times[c] = s.camera_times[c - 1];
+        for (std::size_t c = camera_history - 1; c > 0; --c) s.cameras[c] = s.cameras[c - 1];
         s.cameras[0] = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10], m[12], m[13], m[14]};
-        LARGE_INTEGER counter{}, frequency{};
-        QueryPerformanceCounter(&counter);
-        QueryPerformanceFrequency(&frequency);
-        s.camera_times[0] = static_cast<double>(counter.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart);
         s.cameras_known = std::min(s.cameras_known + 1, camera_history);
     }
-    // The camera the picture was drawn with (camera_delay): the oldest kept, until there are enough.
-    std::size_t delay = std::min(camera_delay, s.cameras_known - 1);
-    std::array<float, camera_floats> blended = s.cameras[delay];
-    {
-        // TEST: a plugin's own delay, between two frames' cameras blended (axes made unit again).
-        auto& a = asked();
-        std::lock_guard lock(a.mutex);
-        const float asked_delay = a.settings.camera_delay;
-        const float asked_ms = a.settings.camera_delay_ms;
-        if (asked_ms >= 0 && s.cameras_known > 1) {
-            // The camera as it was that many milliseconds ago, between the two read either side of then.
-            const double then = s.camera_times[0] - asked_ms;
-            std::size_t older = 1;
-            while (older + 1 < s.cameras_known && s.camera_times[older] > then) ++older;
-            const std::size_t newer = older - 1;
-            const double span = s.camera_times[newer] - s.camera_times[older];
-            const float t = span > 1e-6 ? static_cast<float>(std::clamp((s.camera_times[newer] - then) / span, 0.0, 1.0)) : 0.0f;
-            for (std::size_t k = 0; k < camera_floats; ++k) blended[k] = s.cameras[newer][k] + (s.cameras[older][k] - s.cameras[newer][k]) * t;
-            for (std::size_t axis = 0; axis < 3; ++axis) {
-                float* const v = blended.data() + axis * 3;
-                const float n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-                if (n > 1e-6f) v[0] /= n, v[1] /= n, v[2] /= n;
-            }
-            delay = newer;
-        } else if (asked_delay >= 0 && s.cameras_known > 1) {
-            const float most = static_cast<float>(s.cameras_known - 1);
-            const float frames_back = std::min(asked_delay, most);
-            const auto newer = static_cast<std::size_t>(std::floor(frames_back));
-            const auto older = std::min(newer + 1, s.cameras_known - 1);
-            const float t = frames_back - static_cast<float>(newer);
-            for (std::size_t k = 0; k < camera_floats; ++k) blended[k] = s.cameras[newer][k] + (s.cameras[older][k] - s.cameras[newer][k]) * t;
-            for (std::size_t axis = 0; axis < 3; ++axis) {
-                float* const v = blended.data() + axis * 3;
-                const float n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-                if (n > 1e-6f) v[0] /= n, v[1] /= n, v[2] /= n;
-            }
-            delay = newer;
-        }
+    // The camera the picture was drawn with (camera_delay): between the two kept either side of it, blended
+    // (its axes made unit again); the oldest kept, until there are enough.
+    const float back = std::min(camera_delay, static_cast<float>(s.cameras_known - 1));
+    const auto delay = static_cast<std::size_t>(back);
+    const std::size_t older = std::min(delay + 1, s.cameras_known - 1);
+    const float blend = back - static_cast<float>(delay);
+    std::array<float, camera_floats> camera{};
+    for (std::size_t k = 0; k < camera_floats; ++k) camera[k] = s.cameras[delay][k] + (s.cameras[older][k] - s.cameras[delay][k]) * blend;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        float* const v = camera.data() + axis * 3;
+        const float length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        if (length > 1e-6f) v[0] /= length, v[1] /= length, v[2] /= length;
     }
-    const auto& camera = blended;
 
     Settings settings;
     std::vector<Clear> clear;

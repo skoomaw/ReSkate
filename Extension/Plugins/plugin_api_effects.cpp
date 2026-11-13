@@ -124,8 +124,6 @@ struct EffectsApi {
         number("snowfall", c.snowfall, 0, 1, "a cover's snowfall is 0 to 1");
         number("fall_speed", c.fall_speed, 0.1, 4, "a cover's fall_speed is 0.1 to 4");
         number("left", c.left, 0, 1, "a cover's left is 0 to 1");
-        number("camera_delay", c.camera_delay, -1, 4, "a cover's camera_delay is 1 to 4 frames"); // TEST
-        number("camera_delay_ms", c.camera_delay_ms, -1, 60, "a cover's camera_delay_ms is 0 to 60"); // TEST
         lua_getfield(L, 1, "snowfall_stopping");
         c.snowfall_stopping = lua_toboolean(L, -1) != 0;
         lua_pop(L, 1);

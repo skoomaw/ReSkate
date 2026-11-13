@@ -1287,8 +1287,6 @@ public:
         s.fall_speed = cover->fall_speed;
         s.left = cover->left;
         s.snowfall_stopping = cover->snowfall_stopping;
-        s.camera_delay = cover->camera_delay;
-        s.camera_delay_ms = cover->camera_delay_ms;
         world_cover::set(s);
         return {};
     }
