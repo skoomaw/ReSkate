@@ -31,6 +31,13 @@ StructuredBuffer<float4> cameras : register(t3);
 #define PLACES (CANDIDATES * 4)
 #define TRAIL (PLACES + 9)
 #define MOST_TRAIL 256
+// After the trails, the roof map (world_cover.cpp's measure_roofs): [0] = (on, the near grid's cells across,
+// its cell size, the far grid's cells across), [1] = (the far grid's cell size, -, -, -), then the near grid's
+// cells, then the far grid's, a float4 a cell kept where its world position falls (x and z each modulo its
+// cells across): (the highest surface over the cell's middle, which cell it is: x, z, 1 once measured).
+#define ROOF (TRAIL + 2 + MOST_TRAIL * 2)
+// Something this far over a surface is a roof over it (a ceiling, a bridge), not a bench or a rail on it.
+#define ROOF_CLEARANCE 1.5
 
 struct Vertex { float4 position : SV_Position; };
 struct Output {
@@ -197,6 +204,57 @@ float noise(float2 p) {
     return lerp(lerp(cell_hash(i), cell_hash(i + float2(1, 0)), u.x), lerp(cell_hash(i + float2(0, 1)), cell_hash(i + float2(1, 1)), u.x), u.y);
 }
 
+// One grid of the roof map round a point: how much it is under a roof (0 to 1, the four nearest cells' middles
+// blended), or -1 where one of them is not measured, or measured for another place.
+float roof_grid(float3 at, int base, int n, float size, float clearance) {
+    const float2 c = at.xz / size - 0.5;
+    const float2 corner = floor(c);
+    const float2 f = c - corner;
+    float under[4];
+    [unroll] for (int k = 0; k < 4; ++k) {
+        const int2 cell = int2(corner) + int2(k & 1, k >> 1);
+        const int2 slot = ((cell % n) + n) % n;
+        const float4 v = cameras[base + slot.x + slot.y * n];
+        if (!(v.w > 0 && (int)v.y == cell.x && (int)v.z == cell.y)) return -1;
+        under[k] = at.y < v.x - clearance ? 1 : 0;
+    }
+    return lerp(lerp(under[0], under[1], f.x), lerp(under[2], under[3], f.x), f.y);
+}
+// How much a point is under a roof (0 to 1): from the fine near grid, else the coarse far one, else none.
+// `clearance`: how far over the point something must be to count (a bench or a rail on the ground does not).
+float roof_blend(float3 at, float clearance) {
+    const float4 head = cameras[ROOF];
+    if (head.x <= 0) return 0;
+    const int near_cells = (int)head.y;
+    float r = roof_grid(at, ROOF + 2, near_cells, head.z, clearance);
+    if (r < 0) r = roof_grid(at, ROOF + 2 + near_cells * near_cells, (int)head.w, cameras[ROOF + 1].x, clearance);
+    return max(r, 0);
+}
+// The cover's edge under a roof, as snow drifts in under one: the roof map averaged over a disc about 4.5 m
+// across, so the snow carries on a metre or so in under the edge and thins out smoothly over about two
+// metres, all gone further in. A broad, gentle wander in the world keeps the edge from looking ruled, and
+// stays put. (Before: an edge a few centimetres, then one of 1.5 m with small, jagged noise, 2026-11-13.)
+float roofed_at(float3 at) {
+    const float centre = roof_blend(at, ROOF_CLEARANCE);
+    float outer = 0;
+    [unroll] for (int k = 0; k < 6; ++k) {
+        const float angle = k * 1.0471976;
+        outer += roof_blend(at + float3(cos(angle), 0, sin(angle)) * 2.2, ROOF_CLEARANCE);
+    }
+    if (centre + outer <= 0) return 0; // no roof near: most of the ground
+    float inner = 0;
+    [unroll] for (int j = 0; j < 6; ++j) {
+        const float angle = j * 1.0471976 + 0.5235988;
+        inner += roof_blend(at + float3(cos(angle), 0, sin(angle)) * 1.1, ROOF_CLEARANCE);
+    }
+    float c = (centre * 2 + inner + outer) / 14;
+    c += (noise(at.xz * 0.5) - 0.5) * 0.12;
+    return smoothstep(0.5, 0.97, c);
+}
+// Whether a falling flake is under a roof. Flakes are hidden there one by one, so indoors none fall, and
+// through a doorway it still snows outside.
+bool roof_over(float3 at) { return roof_blend(at, 0) > 0.5; }
+
 float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
 // The middle brightness of 16 samples of the picture round p, on the same plane as `here` (within
@@ -254,7 +312,7 @@ float flake_layer(float3 dir, float limit, float cell, float chance, float radiu
             float3 centre = c + 0.2 + seed.yzx * 0.6;
             centre.xz += float2(sin(seconds * (0.6 + seed.y) + seed.z * 6.2831853), cos(seconds * (0.5 + seed.z) + seed.y * 6.2831853)) * (0.06 / cell);
             const float3 a = centre * cell - shift - eye_near.xyz; // the flake against the camera, in metres
-            if (a.y <= top) { // above where the falling snow ends now, none falls any more
+            if (a.y <= top && !roof_over(a + eye_near.xyz)) { // above where the falling snow ends now, none falls any more; none under a roof
             // The nearest the ray comes to the flake's streak (a to a + streak).
             const float3 d = streak;
             const float dd = dot(d, d);
@@ -380,6 +438,8 @@ Output ps_main(Vertex input) {
         const float bend_across = min(abs(dl2 - 2 * dl + d), abs(d - 2 * dr + dr2));
         const float bend_along = min(abs(du2 - 2 * du + d), abs(d - 2 * dd + dd2));
         cover *= 1 - smoothstep(0.0015, 0.006, max(bend_across, bend_along) / d);
+        // None under a roof (indoors, under a bridge), where the plugin asks.
+        cover *= 1 - roofed_at(steady);
     }
 
     // Distances are only real when measured: the trails and the places kept clear need them.
