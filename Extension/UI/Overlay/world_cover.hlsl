@@ -147,10 +147,15 @@ float trail_at(float3 here, float3 dir, out float shade) {
         const float2 along = b.xz - a.xz;
         const float length_squared = dot(along, along);
         // Two points far apart are not one trail (a teleport, a respawn).
-        if (length_squared < 4.0 && strength_a > 0 && strength_b > 0 && dir.y < -1e-4) {
-            // The ray onto the ground at this stretch's height.
-            const float ground = (a.y + b.y) * 0.5;
-            const float reach = (ground - eye_near.y) / dir.y;
+        if (length_squared < 4.0 && length_squared > 1e-6 && strength_a > 0 && strength_b > 0 && dir.y < -1e-4) {
+            // The ray onto the ground of this stretch: the plane through both its points, level across it, so it
+            // follows a slope along the trail. A level plane at the stretch's middle height drew a trail up a
+            // slope as steps, jumping from one to the next (2026-11-13).
+            const float3 sideways = normalize(float3(-along.y, 0, along.x));
+            float3 ground_up = normalize(cross(b.xyz - a.xyz, sideways));
+            if (ground_up.y < 0) ground_up = -ground_up;
+            const float facing_ground = dot(dir, ground_up);
+            const float reach = facing_ground < -1e-4 ? dot(a.xyz - eye_near.xyz, ground_up) / facing_ground : -1;
             const float3 on = eye_near.xyz + dir * reach;
             const float seen = length(here - eye_near.xyz);
             const float t = saturate(dot(on.xz - a.xz, along) / max(length_squared, 1e-6));
