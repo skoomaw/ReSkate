@@ -9,6 +9,7 @@
 #include "Engine/Game/Build/addresses.h"
 #include "Engine/Game/Build/20260929/engine.h"
 #include "Engine/Game/Build/20260929/native_audio.h"
+#include "Extension/Skater/no_bail.h" // research: the skater's state
 #include <Windows.h>
 #include "Extension/Multiplayer/Session/monotonic_clock.h"
 #include "Extension/Multiplayer/Session/peer_slots.h"
@@ -18,6 +19,7 @@
 #include <mutex>
 #include <memory>
 #include <format>
+#include <string>
 #include <cstring>
 
 namespace dingosdk::multiplayer {
@@ -213,6 +215,17 @@ void submit_hook(Address handle, const NativeAudioFrame *frame) {
             audio_value<std::uint32_t>(sent, 0x124), audio_value<std::uint32_t>(sent, 0xc0)};
         copy(s.accumulated.get(), &sent, sent_masks.data());
         copy(s.as_given.get(), &given, masks.data());
+        // Research (the footstep-research branch, not for merging): the sound's state as the game gives it,
+        // four times a second, with the skater's state, to find what makes the powerslide sound.
+        static ULONGLONG said_at{};
+        if (const auto now_ms = GetTickCount64(); now_ms - said_at >= 250) {
+            said_at = now_ms;
+            std::string line = std::format("Sound state: skater {}; floats", watched_physics_state().state);
+            for (const auto off : audio_float_offsets) line += std::format(" {:x}={:.3g}", off, audio_value<float>(*s.as_given, off));
+            line += "; selectors";
+            for (const auto off : audio_selector_offsets) line += std::format(" {:x}={:x}", off, audio_value<std::uint32_t>(*s.as_given, off));
+            logging::write(logging::Level::info, logging::Channel::skater, line);
+        }
         s.queue.push(audio_state(*s.accumulated), now_us());
         ++s.captured;
         s.capture_issue.clear();
