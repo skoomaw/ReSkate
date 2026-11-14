@@ -1028,35 +1028,17 @@ void watch_gpu_memory() noexcept {
 void watch_constants(ConstantsWatcher watcher) noexcept { constants_watcher.store(watcher); }
 
 namespace {
-// Buffers read_gpu_buffer has opened, kept open (and held) so that each later read is a copy, with no lock the
-// game also takes: the game's upload rings, a few of them. And the starts of buffers it could not map.
-struct Opened {
-    std::uint64_t start{}, length{};
-    ComPtr<ID3D12Resource> resource;
-    const char* cpu{};
-};
-constexpr std::size_t opened_most = 32;
-std::mutex opened_mutex;
-std::vector<Opened> opened;
+// The starts of buffers read_gpu_buffer could not map (not in a CPU-visible heap): not tried again.
+std::mutex unmappable_mutex;
 std::vector<std::uint64_t> unmappable;
 }
 
 std::size_t read_gpu_buffer(std::uint64_t address, void* out, std::size_t bytes, std::uint64_t* buffer_start,
                             std::uint64_t* buffer_length) noexcept {
     try {
-        const auto copy = [&](const Opened& o) {
-            const auto offset = address - o.start;
-            const auto n = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, o.length - offset));
-            std::memcpy(out, o.cpu + offset, n);
-            if (buffer_start) *buffer_start = o.start;
-            if (buffer_length) *buffer_length = o.length;
-            return n;
-        };
-        std::lock_guard open_lock(opened_mutex);
-        for (const auto& o : opened)
-            if (address >= o.start && address - o.start < o.length) return copy(o);
-        // Not open yet: the buffer holding the address, from the memory watch.
-        Opened o;
+        // The buffer holding the address, from the memory watch, held for the read.
+        std::uint64_t start{}, length{};
+        ComPtr<ID3D12Resource> resource;
         {
             auto& m = gpu_memory();
             std::lock_guard lock(m.mutex);
@@ -1064,23 +1046,27 @@ std::size_t read_gpu_buffer(std::uint64_t address, void* out, std::size_t bytes,
             if (at == m.buffers.begin()) return 0;
             --at;
             if (address - at->first >= at->second.first) return 0;
-            o.start = at->first, o.length = at->second.first;
-            if (std::find(unmappable.begin(), unmappable.end(), o.start) != unmappable.end()) return 0;
-            if (FAILED(static_cast<IUnknown*>(at->second.second)->QueryInterface(IID_PPV_ARGS(&o.resource))) || !o.resource) return 0;
+            start = at->first, length = at->second.first;
+            if (FAILED(static_cast<IUnknown*>(at->second.second)->QueryInterface(IID_PPV_ARGS(&resource))) || !resource) return 0;
+        }
+        {
+            std::lock_guard lock(unmappable_mutex);
+            if (std::find(unmappable.begin(), unmappable.end(), start) != unmappable.end()) return 0;
         }
         void* cpu{};
-        if (FAILED(o.resource->Map(0, nullptr, &cpu)) || !cpu) { // (only a CPU-visible heap maps)
-            if (unmappable.size() < 4096) unmappable.push_back(o.start);
+        if (FAILED(resource->Map(0, nullptr, &cpu)) || !cpu) { // (only a CPU-visible heap maps)
+            std::lock_guard lock(unmappable_mutex);
+            if (unmappable.size() < 4096) unmappable.push_back(start);
             return 0;
         }
-        o.cpu = static_cast<const char*>(cpu);
-        if (opened.size() >= opened_most) {
-            const D3D12_RANGE written{0, 0};
-            opened.front().resource->Unmap(0, &written);
-            opened.erase(opened.begin());
-        }
-        opened.push_back(std::move(o));
-        return copy(opened.back());
+        const auto offset = address - start;
+        const auto n = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, length - offset));
+        std::memcpy(out, static_cast<const char*>(cpu) + offset, n);
+        const D3D12_RANGE written{0, 0};
+        resource->Unmap(0, &written);
+        if (buffer_start) *buffer_start = start;
+        if (buffer_length) *buffer_length = length;
+        return n;
     } catch (...) {
         return 0;
     }
