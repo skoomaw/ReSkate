@@ -985,14 +985,17 @@ void STDMETHODCALLTYPE hooked_compute_cbv(ID3D12GraphicsCommandList* list, UINT 
 
 // The camera the game drew this frame with, from the compute constant buffers bound since the last frame
 // (the newest 16): those that hold a camera, unit axes as rows from 16 bytes in, where it is in the fourth row.
-//  1. The newest close to `camera` (the one read from the game, delayed): within about 14 degrees and 2 m.
-//     Which way round each of its axes is against ours is learnt from it.
+//  1. Of those close to `camera` (the one read from the game, delayed: within about 14 degrees and 2 m), the
+//     one most of them hold, the newest of any as many. A frame's buffers hold two or three cameras a little
+//     apart (the game easing its camera between updates); the newest close one was now one, now another, and
+//     the trails jiggled as the camera moved (2026-11-14). Which way round each of its axes is against ours is
+//     learnt from it.
 //  2. Else, once those ways round are known, the one most of them hold, if two or more do: in the replay
 //     editor the camera read from the game is not the one it draws with, and the trails swam (2026-11-14).
 // Its buffer is read through the GPU memory watch (gpu_diagnostics.h). False when there is none.
 bool game_camera(Shared& s, std::array<float, camera_floats>& camera) {
     const auto end = bound_count.load();
-    constexpr std::uint64_t looked_most = 16;
+    constexpr std::uint64_t looked_most = 32;
     const auto begin = std::max(s.bound_seen, end > looked_most ? end - looked_most : std::uint64_t{0});
     s.bound_seen = end;
     std::vector<std::array<float, camera_floats>> held; // as the buffers have them, newest first
@@ -1025,8 +1028,26 @@ bool game_camera(Shared& s, std::array<float, camera_floats>& camera) {
             for (std::size_t c = 0; c < 3; ++c) out[a * 3 + c] *= s.camera_signs[a];
         return out;
     };
+    const auto same = [](const std::array<float, camera_floats>& a, const std::array<float, camera_floats>& b) {
+        for (std::size_t k = 0; k < camera_floats; ++k)
+            if (std::abs(a[k] - b[k]) > (k >= 9 ? 0.01f : 0.001f)) return false;
+        return true;
+    };
+    // The one most of `which` hold (newest first, so the newest of any as many), and how many hold it.
+    const auto most_held = [&](const std::vector<std::size_t>& which) {
+        std::size_t best = which.front(), best_count = 0;
+        for (const auto i : which) {
+            std::size_t count = 0;
+            for (const auto j : which) count += same(held[i], held[j]) ? 1 : 0;
+            if (count > best_count) best = i, best_count = count;
+        }
+        return std::pair{best, best_count};
+    };
     // 1. Close to the camera read from the game.
-    for (const auto& one : held) {
+    std::vector<std::size_t> close_ones;
+    std::array<float, 3> close_signs{};
+    for (std::size_t i = 0; i < held.size(); ++i) {
+        const auto& one = held[i];
         std::array<float, 3> signs{};
         bool close = true;
         for (std::size_t a = 0; a < 3 && close; ++a) {
@@ -1037,24 +1058,20 @@ bool game_camera(Shared& s, std::array<float, camera_floats>& camera) {
         }
         for (std::size_t c = 0; c < 3 && close; ++c) close = std::abs(one[9 + c] - camera[9 + c]) < 2.0f;
         if (!close) continue;
-        s.camera_signs = signs;
+        if (close_ones.empty()) close_signs = signs;
+        close_ones.push_back(i);
+    }
+    if (!close_ones.empty()) {
+        s.camera_signs = close_signs;
         s.camera_signs_known = true;
-        camera = turned(one);
+        camera = turned(held[most_held(close_ones).first]);
         return true;
     }
     // 2. The one most of them hold.
     if (!s.camera_signs_known || held.size() < 2) return false;
-    const auto same = [](const std::array<float, camera_floats>& a, const std::array<float, camera_floats>& b) {
-        for (std::size_t k = 0; k < camera_floats; ++k)
-            if (std::abs(a[k] - b[k]) > (k >= 9 ? 0.01f : 0.001f)) return false;
-        return true;
-    };
-    std::size_t best = 0, best_count = 0;
-    for (std::size_t i = 0; i < held.size(); ++i) {
-        std::size_t count = 0;
-        for (const auto& other : held) count += same(held[i], other) ? 1 : 0;
-        if (count > best_count) best = i, best_count = count;
-    }
+    std::vector<std::size_t> all(held.size());
+    for (std::size_t i = 0; i < all.size(); ++i) all[i] = i;
+    const auto [best, best_count] = most_held(all);
     if (best_count < 2) return false;
     camera = turned(held[best]);
     return true;
