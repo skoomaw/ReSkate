@@ -189,6 +189,18 @@ void submit_hook(Address handle, const NativeAudioFrame *frame) {
                 copy(&full, &given, masks.data());
                 send_full = true;
             }
+            // Research (not for merging): rolling (state 100) told it slides as a powerslide does: c4 near
+            // 1 (seen at +-0.99 through powerslides), b4 near 0 (the wheels' roll, seen falling to it).
+            if (watched_physics_state().state == 100) {
+                if (!send_full) {
+                    full = *s.accumulated;
+                    copy(&full, &snapshot, masks.data());
+                    if (sound_word) put_surface_sound(s, full, sound_word);
+                    send_full = true;
+                }
+                audio_put(full, 0xc4, 0.99f);
+                audio_put(full, 0xb4, 0.0f);
+            }
             if (send_full) {
                 for (const auto off : {0x164, 0x130, 0x124})
                     audio_put(full, off, UINT32_MAX);
