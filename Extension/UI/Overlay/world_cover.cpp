@@ -18,6 +18,7 @@
 #include <set>
 #include <tuple>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -249,6 +250,9 @@ struct Shared {
     // The game's own camera (game_camera): the binds already looked through, and how many frames found it.
     std::uint64_t bound_seen{};
     unsigned game_camera_frames{}, camera_frames{}, camera_reports{};
+    std::array<float, 3> camera_signs{1, 1, 1}; // which way round each of its axes is against ours, once learnt
+    bool camera_signs_known{};
+    float places_back = camera_delay; // how many frames back the places are taken (the drawn camera's, as found)
     // The places kept clear as each of those frames was drawn, newest first: a place on something that moves
     // (a deck) is drawn where the picture has it, camera_delay back, like the world.
     std::array<std::vector<Clear>, camera_history> clears{};
@@ -587,19 +591,74 @@ bool build_root(Shared& s) {
     return true;
 }
 
+// The shaders, compiled once on a thread of their own as soon as the hooks are in (start_compiling): compiled
+// as the snow first came on, on the thread the game draws with, nothing was drawn while they compiled, and
+// with the roof work that was long enough (25 s) for a black screen and the game leaving the level
+// (2026-11-14). Until they are ready the cover waits.
+struct Compiled {
+    std::mutex mutex;
+    std::map<std::string, ComPtr<ID3DBlob>> blobs; // entry -> its shader
+    std::string error;
+    std::atomic<int> state{}; // 0 not started, 1 compiling, 2 ready, 3 failed
+};
+Compiled& compiled() { static auto* value = new Compiled; return *value; }
+void start_compiling() {
+    auto& c = compiled();
+    int idle = 0;
+    if (!c.state.compare_exchange_strong(idle, 1)) return;
+    try {
+        std::thread([] {
+            auto& done = compiled();
+            const auto length = std::strlen(world_cover_hlsl);
+            const auto started = GetTickCount64();
+            const std::pair<const char*, const char*> entries[]{{"vs_main", "vs_5_0"}, {"ps_main", "ps_5_0"}, {"ps_measure", "ps_5_0"},
+                                                                {"ps_depth", "ps_5_0"}};
+            for (const auto& [entry, target] : entries) {
+                ComPtr<ID3DBlob> blob, error;
+                if (FAILED(D3DCompile(world_cover_hlsl, length, "world_cover", nullptr, nullptr, entry, target, 0, 0, &blob, &error)) || !blob) {
+                    std::lock_guard lock(done.mutex);
+                    done.error = std::string(entry) + (error ? std::string(": ") + static_cast<const char*>(error->GetBufferPointer()) : "");
+                    done.state.store(3);
+                    return;
+                }
+                std::lock_guard lock(done.mutex);
+                done.blobs[entry] = blob;
+            }
+            done.state.store(2);
+            logging::printf(logging::Level::info, logging::Channel::graphics, "World cover: its shaders compiled in %.1f s, apart from the game's drawing.",
+                            static_cast<double>(GetTickCount64() - started) / 1000.0);
+        }).detach();
+    } catch (...) {
+        c.state.store(0);
+    }
+}
+// The vertex shader and `entry`'s, once compiled. False while they are compiling (s.why says so), or when they
+// failed (said once).
+bool shaders_for(Shared& s, const char* entry, ComPtr<ID3DBlob>& vertex, ComPtr<ID3DBlob>& pixel) {
+    auto& c = compiled();
+    start_compiling();
+    const int state = c.state.load();
+    if (state == 3) {
+        std::lock_guard lock(c.mutex);
+        say_failed("its shader did not compile: " + c.error);
+        return false;
+    }
+    if (state != 2) {
+        s.why = "its shaders are still compiling";
+        return false;
+    }
+    std::lock_guard lock(c.mutex);
+    vertex = c.blobs["vs_main"], pixel = c.blobs[entry];
+    return vertex && pixel;
+}
+
 // The pass that copies the game's depth into ours (ps_depth): one target, the depth as a float.
 // A pipeline of one target in `format`, with world_cover.hlsl's `entry` (ps_depth, ps_measure).
 bool build_single(Shared& s, const char* entry, DXGI_FORMAT format, ComPtr<ID3D12PipelineState>& pipeline) {
     if (pipeline) return true;
     if (!build_root(s)) return false;
-    const auto length = std::strlen(world_cover_hlsl);
-    ComPtr<ID3DBlob> vertex, pixel, error;
-    if (FAILED(D3DCompile(world_cover_hlsl, length, "world_cover", nullptr, nullptr, "vs_main", "vs_5_0", 0, 0, &vertex, &error)) || !vertex ||
-        FAILED(D3DCompile(world_cover_hlsl, length, "world_cover", nullptr, nullptr, entry, "ps_5_0", 0, 0, &pixel, &error)) || !pixel) {
-        say_failed(std::string("its shader ") + entry + " did not compile" +
-                   (error ? std::string(": ") + static_cast<const char*>(error->GetBufferPointer()) : "."));
-        return false;
-    }
+    ComPtr<ID3DBlob> vertex, pixel;
+    if (!shaders_for(s, entry, vertex, pixel)) return false;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
     description.pRootSignature = s.root.Get();
     description.VS = {vertex->GetBufferPointer(), vertex->GetBufferSize()};
@@ -626,13 +685,8 @@ bool build_pipeline(Shared& s, DXGI_FORMAT format) {
     if (s.pipeline) s.retiring.push_back({s.fence_value, s.pipeline});
     s.pipeline.Reset();
     if (!build_root(s)) return false;
-    const auto length = std::strlen(world_cover_hlsl);
-    ComPtr<ID3DBlob> vertex, pixel, error;
-    if (FAILED(D3DCompile(world_cover_hlsl, length, "world_cover", nullptr, nullptr, "vs_main", "vs_5_0", 0, 0, &vertex, &error)) || !vertex ||
-        FAILED(D3DCompile(world_cover_hlsl, length, "world_cover", nullptr, nullptr, "ps_main", "ps_5_0", 0, 0, &pixel, &error)) || !pixel) {
-        say_failed(std::string("its shader did not compile") + (error ? std::string(": ") + static_cast<const char*>(error->GetBufferPointer()) : "."));
-        return false;
-    }
+    ComPtr<ID3DBlob> vertex, pixel;
+    if (!shaders_for(s, "ps_main", vertex, pixel)) return false;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
     description.pRootSignature = s.root.Get();
     description.VS = {vertex->GetBufferPointer(), vertex->GetBufferSize()};
@@ -929,43 +983,103 @@ void STDMETHODCALLTYPE hooked_compute_cbv(ID3D12GraphicsCommandList* list, UINT 
     bound_addresses[n % bound_kept].store(address, std::memory_order_relaxed);
 }
 
-// The camera the game drew this frame with, from the compute constant buffers bound since the last frame,
-// newest first: the first that holds a camera (unit axes, as rows from 16 bytes in) close to `camera` (the
-// one read from the game, delayed), within about 14 degrees and 2 m. Each axis is taken the way round
-// `camera` has it. Its buffer is read through the GPU memory watch (gpu_diagnostics.h); false when none.
+// The camera the game drew this frame with, from the compute constant buffers bound since the last frame
+// (the newest 16): those that hold a camera, unit axes as rows from 16 bytes in, where it is in the fourth row.
+//  1. The newest close to `camera` (the one read from the game, delayed): within about 14 degrees and 2 m.
+//     Which way round each of its axes is against ours is learnt from it.
+//  2. Else, once those ways round are known, the one most of them hold, if two or more do: in the replay
+//     editor the camera read from the game is not the one it draws with, and the trails swam (2026-11-14).
+// Its buffer is read through the GPU memory watch (gpu_diagnostics.h). False when there is none.
 bool game_camera(Shared& s, std::array<float, camera_floats>& camera) {
     const auto end = bound_count.load();
-    constexpr std::uint64_t looked_most = 16; // the newest binds since the last frame, at most
+    constexpr std::uint64_t looked_most = 16;
     const auto begin = std::max(s.bound_seen, end > looked_most ? end - looked_most : std::uint64_t{0});
     s.bound_seen = end;
+    std::vector<std::array<float, camera_floats>> held; // as the buffers have them, newest first
     std::array<float, 20> f{};
     for (auto n = end; n > begin; --n) {
         const auto address = bound_addresses[(n - 1) % bound_kept].load(std::memory_order_relaxed);
         if (!address || overlay::read_gpu_buffer(address, f.data(), sizeof(f)) < sizeof(f)) continue;
         const float* const rows = f.data() + 4;
-        std::array<float, camera_floats> found{};
+        std::array<float, camera_floats> one{};
         bool ok = true;
         for (std::size_t a = 0; a < 3 && ok; ++a) {
-            float length = 0, along = 0;
+            float length = 0;
             for (std::size_t c = 0; c < 3; ++c) {
                 const float v = rows[a * 4 + c];
                 ok = ok && std::isfinite(v);
-                length += v * v, along += v * camera[a * 3 + c];
+                length += v * v;
+                one[a * 3 + c] = v;
             }
-            const float sign = along < 0 ? -1.0f : 1.0f;
-            ok = ok && std::abs(length - 1.0f) < 0.02f && along * sign > 0.97f;
-            for (std::size_t c = 0; c < 3; ++c) found[a * 3 + c] = rows[a * 4 + c] * sign;
+            ok = ok && std::abs(length - 1.0f) < 0.02f;
         }
         for (std::size_t c = 0; c < 3 && ok; ++c) {
-            const float v = rows[12 + c];
-            ok = std::isfinite(v) && std::abs(v - camera[9 + c]) < 2.0f;
-            found[9 + c] = v;
+            ok = std::isfinite(rows[12 + c]) && std::abs(rows[12 + c]) < 1e6f;
+            one[9 + c] = rows[12 + c];
         }
-        if (!ok) continue;
-        camera = found;
+        if (ok) held.push_back(one);
+    }
+    const auto turned = [&](const std::array<float, camera_floats>& one) {
+        auto out = one;
+        for (std::size_t a = 0; a < 3; ++a)
+            for (std::size_t c = 0; c < 3; ++c) out[a * 3 + c] *= s.camera_signs[a];
+        return out;
+    };
+    // 1. Close to the camera read from the game.
+    for (const auto& one : held) {
+        std::array<float, 3> signs{};
+        bool close = true;
+        for (std::size_t a = 0; a < 3 && close; ++a) {
+            float along = 0;
+            for (std::size_t c = 0; c < 3; ++c) along += one[a * 3 + c] * camera[a * 3 + c];
+            signs[a] = along < 0 ? -1.0f : 1.0f;
+            close = along * signs[a] > 0.97f;
+        }
+        for (std::size_t c = 0; c < 3 && close; ++c) close = std::abs(one[9 + c] - camera[9 + c]) < 2.0f;
+        if (!close) continue;
+        s.camera_signs = signs;
+        s.camera_signs_known = true;
+        camera = turned(one);
         return true;
     }
-    return false;
+    // 2. The one most of them hold.
+    if (!s.camera_signs_known || held.size() < 2) return false;
+    const auto same = [](const std::array<float, camera_floats>& a, const std::array<float, camera_floats>& b) {
+        for (std::size_t k = 0; k < camera_floats; ++k)
+            if (std::abs(a[k] - b[k]) > (k >= 9 ? 0.01f : 0.001f)) return false;
+        return true;
+    };
+    std::size_t best = 0, best_count = 0;
+    for (std::size_t i = 0; i < held.size(); ++i) {
+        std::size_t count = 0;
+        for (const auto& other : held) count += same(held[i], other) ? 1 : 0;
+        if (count > best_count) best = i, best_count = count;
+    }
+    if (best_count < 2) return false;
+    camera = turned(held[best]);
+    return true;
+}
+
+// How many frames back the camera the game drew with is among those read from the game (blended between the
+// two nearest), or -1 when it is none of them (the replay editor) or they are all the same (a camera at rest).
+float drawn_frames_back(const Shared& s, const std::array<float, camera_floats>& drawn) {
+    std::array<float, camera_history> off{};
+    for (std::size_t k = 0; k < s.cameras_known; ++k) {
+        float worst = 0;
+        for (std::size_t i = 0; i < camera_floats; ++i)
+            worst = std::max(worst, std::abs(drawn[i] - s.cameras[k][i]) * (i >= 9 ? 0.1f : 1.0f)); // (10 cm as a degree's turn, about)
+        off[k] = worst;
+    }
+    if (s.cameras_known < 2) return -1;
+    const auto nearest = static_cast<std::size_t>(std::min_element(off.begin(), off.begin() + s.cameras_known) - off.begin());
+    const float spread = *std::max_element(off.begin(), off.begin() + s.cameras_known) - off[nearest];
+    if (off[nearest] > 0.05f || spread < 1e-4f) return -1;
+    // Toward the neighbour it is nearer to, by how near.
+    std::size_t other = nearest;
+    if (nearest > 0) other = nearest - 1;
+    if (nearest + 1 < s.cameras_known && (nearest == 0 || off[nearest + 1] < off[nearest - 1])) other = nearest + 1;
+    const float t = off[nearest] / std::max(off[nearest] + off[other], 1e-6f);
+    return static_cast<float>(nearest) + (static_cast<float>(other) - static_cast<float>(nearest)) * t;
 }
 
 bool record_cover(Shared& s) {
@@ -1050,6 +1164,10 @@ bool record_cover(Shared& s) {
     // The camera the game drew this frame with, where it can be read; else the delayed one above.
     const bool own_camera = game_camera(s, camera);
     s.game_camera_frames += own_camera ? 1 : 0;
+    // The places kept clear (the deck) from the same moment as the camera the game drew with, where it is one
+    // of those read: a fixed delay showed the ground at the deck's front or back as it turned (2026-11-13).
+    if (const float back_found = own_camera ? drawn_frames_back(s, camera) : -1.0f; back_found >= 0) s.places_back = back_found;
+    else if (!own_camera) s.places_back = camera_delay;
     if (++s.camera_frames >= 600) {
         if (s.camera_reports < 6) {
             ++s.camera_reports;
@@ -1105,12 +1223,15 @@ bool record_cover(Shared& s) {
     for (std::size_t c = camera_history - 1; c > 0; --c) s.clears[c] = std::move(s.clears[c - 1]);
     s.clears[0] = clear;
     {
-        const auto& near_one = s.clears[delay];
-        const auto& far_one = s.clears[older];
+        const float places_back = std::min(s.places_back, static_cast<float>(s.cameras_known - 1));
+        const auto places_at = static_cast<std::size_t>(places_back);
+        const float places_blend = places_back - static_cast<float>(places_at);
+        const auto& near_one = s.clears[places_at];
+        const auto& far_one = s.clears[std::min(places_at + 1, s.cameras_known - 1)];
         clear = near_one;
         if (far_one.size() == near_one.size()) {
             const auto mix = [&](std::array<float, 3>& to, const std::array<float, 3>& from) {
-                for (std::size_t k = 0; k < 3; ++k) to[k] += (from[k] - to[k]) * blend;
+                for (std::size_t k = 0; k < 3; ++k) to[k] += (from[k] - to[k]) * places_blend;
             };
             const auto unit = [](std::array<float, 3>& v) {
                 const float length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
@@ -1399,6 +1520,7 @@ bool on() noexcept { return wanted.load(); }
 
 void install(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* list) noexcept {
     if (!device || !queue || !list) return;
+    start_compiling(); // ready long before the snow comes on
     auto& s = shared();
     {
         std::lock_guard lock(s.mutex);
