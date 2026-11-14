@@ -265,6 +265,7 @@ add_library(dingosdk_runtime SHARED
     Extension/World/local_park_rotation.cpp
     Extension/World/local_world_layers.cpp
     Extension/World/time_of_day_lighting.cpp
+    Extension/World/footstep_research.cpp
     Extension/World/visual_environment.cpp
     Extension/World/local_population_controls.cpp
     Extension/World/native_route_lookahead.cpp
